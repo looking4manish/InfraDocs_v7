@@ -6,13 +6,20 @@ import { useEffect, useState } from "react";
 let _node = null;   // node_id currently being viewed (null → leader/this node)
 let _leader = null; // the node actually serving the UI
 const subs = new Set();
+const authFailed = new Map(); // node_id -> peer credential rejected
 
 export function getLeader() { return _leader; }
 export function setLeader(id) { _leader = id; }
 export function getSelectedNode() { return _node; }
 export function isLeaderSelected() { return _node == null || _node === _leader; }
-export function setSelectedNode(id) { _node = id; subs.forEach((f) => { try { f(id); } catch { /* noop */ } }); }
+export function setSelectedNode(id) { _node = id; authFailed.clear(); subs.forEach((f) => { try { f(id); } catch { /* noop */ } }); }
 export function subscribeNode(fn) { subs.add(fn); return () => subs.delete(fn); }
+export function setPeerAuthFailed(node, v) {
+  if ((authFailed.get(node) || false) === v) return;
+  authFailed.set(node, v);
+  subs.forEach((f) => { try { f(getSelectedNode()); } catch { /* noop */ } });
+}
+export function peerAuthFailed(node) { return !!authFailed.get(node); }
 export function useSelectedNode() {
   const [n, setN] = useState(_node);
   useEffect(() => subscribeNode(setN), []);

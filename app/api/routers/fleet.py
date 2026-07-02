@@ -17,6 +17,7 @@ from fastapi import APIRouter, Depends, Request, Response
 
 from app import cluster as CC
 from app.api.dependencies import get_config, get_db, verify_auth
+from app.fleet_auth import get_fleet_secret
 from app.core.config_loader import Config
 from app.core.db_manager import DBManager
 
@@ -124,15 +125,20 @@ async def proxy(node_id: str, path: str, request: Request,
         return Response(json.dumps({"error": f"unknown node '{node_id}'"}),
                         status_code=404, media_type="application/json")
 
+    auth_failed = False
     method = request.method
     if node["reachable"] and (node.get("address") or node["self"]):
         body = await request.body()
         addr = node.get("address") or f"http://localhost:{cfg.server.api_port}"
         qs = ("?" + request.url.query) if request.url.query else ""
         url = addr.rstrip("/") + "/" + path.lstrip("/") + qs
+        # Authenticate to the peer with the SHARED FLEET SECRET, not the operator's browser
+        # session (valid only on the serving node). This is what breaks the cross-node
+        # 401 -> login-loop: the peer accepts X-Fleet-Auth as the 'fleet' principal.
         headers = {}
-        if request.headers.get("authorization"):
-            headers["Authorization"] = request.headers["authorization"]
+        _fs = get_fleet_secret(db)
+        if _fs:
+            headers["X-Fleet-Auth"] = _fs
         if request.headers.get("content-type"):
             headers["Content-Type"] = request.headers["content-type"]
         try:
@@ -141,20 +147,30 @@ async def proxy(node_id: str, path: str, request: Request,
             r.headers["X-Fleet-Node"] = node_id
             r.headers["X-Fleet-Live"] = "1"
             return r
-        except urllib.error.HTTPError as e:  # node answered with an error — pass it through
-            return Response(content=e.read(), status_code=e.code, media_type="application/json",
-                            headers={"X-Fleet-Node": node_id, "X-Fleet-Live": "1"})
+        except urllib.error.HTTPError as e:
+            if e.code in (401, 403):
+                # The peer REJECTED the fleet credential. This is NOT the operator's session
+                # expiring — never bounce them to login. Fall through to the stale view with a
+                # clear reason so the frontend shows the FleetBanner, not a redirect loop.
+                auth_failed = True
+            else:
+                return Response(content=e.read(), status_code=e.code, media_type="application/json",
+                                headers={"X-Fleet-Node": node_id, "X-Fleet-Live": "1"})
         except Exception:  # noqa: BLE001 — live forward failed → fall through to stale
             pass
 
-    # unreachable (or the live forward just failed)
+    # unreachable, OR the peer rejected our fleet credential (auth_failed)
+    reason = ("peer authentication failed — the target node rejected the fleet credential"
+              if auth_failed else f"{node_id} is unreachable")
+    hdrs = {"X-Fleet-Node": node_id, "X-Fleet-Stale": "1"}
+    if auth_failed:
+        hdrs["X-Fleet-Auth-Failed"] = "1"
     if method != "GET":
         return Response(
             json.dumps({"ok": False, "stale": True, "node_id": node_id,
-                        "detail": f"{node_id} is unreachable — actions unavailable",
+                        "detail": f"{reason} — actions unavailable",
                         "last_synced_at": str(node.get("last_synced_at"))}),
-            status_code=409, media_type="application/json",
-            headers={"X-Fleet-Node": node_id, "X-Fleet-Stale": "1"})
+            status_code=409, media_type="application/json", headers=hdrs)
     payload = _stale_get(db, node_id, path, node.get("last_synced_at"))
-    return Response(json.dumps(payload, default=str), status_code=200, media_type="application/json",
-                    headers={"X-Fleet-Node": node_id, "X-Fleet-Stale": "1"})
+    payload["reason"] = reason
+    return Response(json.dumps(payload, default=str), status_code=200, media_type="application/json", headers=hdrs)

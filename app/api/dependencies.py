@@ -36,12 +36,21 @@ def get_db() -> DBManager:
 
 def verify_auth(
     authorization: Optional[str] = Header(None),
+    x_fleet_auth: Optional[str] = Header(None),
     credentials: Optional[HTTPBasicCredentials] = Depends(_basic),
     db: DBManager = Depends(get_db),
 ) -> str:
     # Open-house mode: set INFRADOCS_AUTH_DISABLED=1 in .env to bypass auth.
     if _auth_disabled():
         return credentials.username if credentials else "anonymous"
+
+    # Fleet service credential: the shared secret the leader's node-switcher proxy presents
+    # when forwarding a request to a peer. A distinct 'fleet' principal — never a user session,
+    # so a proxied call is accepted without the peer knowing the operator's login.
+    if x_fleet_auth:
+        from app.fleet_auth import fleet_auth_ok
+        if fleet_auth_ok(db, x_fleet_auth):
+            return "fleet"
 
     from app import auth as A  # lazy to avoid import cycle
 

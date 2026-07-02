@@ -175,6 +175,12 @@ def enroll_secondary(db: DBManager, node_id: str, primary_url: str, join_token: 
                       "is_primary": False, "override": False}},
             upsert=True,
         )
+        # Store the shared fleet secret delivered over the trusted enroll channel (+ the
+        # creds to re-sync it later), then strip it so it never propagates to the HTTP caller.
+        sec = result.pop("fleet_secret", None)
+        if sec:
+            from app.fleet_auth import store_fleet_config
+            store_fleet_config(db, primary_url, join_token, sec)
     return result
 
 
