@@ -9,6 +9,8 @@ election lives in app/cluster_lease.py.
 
 import secrets
 from datetime import datetime, timezone
+
+from app.fleet_auth import get_or_create_fleet_secret
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException
@@ -217,5 +219,21 @@ def enroll(req: EnrollRequest, db: DBManager = Depends(get_db)):
             "secondary_to_primary": secondary_to_primary,
             "primary_to_secondary": primary_to_secondary,
         },
+        "fleet_secret": get_or_create_fleet_secret(db) if ok else None,
         "reason": reason if not ok else None,
     }
+
+
+class FleetSecretRequest(BaseModel):
+    server_id: str
+
+
+@router.post("/fleet-secret")
+def fleet_secret_endpoint(req: FleetSecretRequest, x_join_token: Optional[str] = Header(None),
+                          db: DBManager = Depends(get_db)):
+    """Deliver the shared fleet secret to an ENROLLED secondary that presents its durable
+    join token (same trust anchor as ingest). Convergence path for already-enrolled nodes —
+    no re-enroll. Returned only over this gated channel; never logged."""
+    if not _valid_token(db, req.server_id, x_join_token):
+        raise HTTPException(status_code=401, detail="invalid or missing join token")
+    return {"fleet_secret": get_or_create_fleet_secret(db)}

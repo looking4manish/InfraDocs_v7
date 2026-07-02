@@ -1,5 +1,5 @@
 import axios from "axios";
-import { getSelectedNode, isLeaderSelected } from "../lib/fleet";
+import { getSelectedNode, isLeaderSelected, setPeerAuthFailed } from "../lib/fleet";
 
 // Session-token auth: login → opaque token → sent as `Authorization: Bearer`.
 // No credentials ever live in the JS bundle or persist beyond the token.
@@ -44,9 +44,21 @@ api.interceptors.request.use((config) => {
 // On 401, drop the (now invalid/expired) token and let the app fall back to
 // the login screen instead of looping with a dead session.
 api.interceptors.response.use(
-  (r) => r,
+  (r) => {
+    // A proxied fleet call whose peer rejected our credential flags the node so the
+    // FleetBanner can explain it — WITHOUT ever treating it as the operator's session dying.
+    if (r?.headers?.["x-fleet-auth-failed"]) {
+      const m = /^\/api\/fleet\/([^/]+)\//.exec(r.config?.url || "");
+      if (m) setPeerAuthFailed(decodeURIComponent(m[1]), true);
+    }
+    return r;
+  },
   (err) => {
-    if (err?.response?.status === 401 && getToken()) {
+    const url = err?.config?.url || "";
+    const isFleet = url.startsWith("/api/fleet/");
+    // A 401 from a PROXIED peer call is not our session expiring — never log out / redirect
+    // (the fleet view falls back to stale). Only a 401 on a normal call ends the session.
+    if (err?.response?.status === 401 && getToken() && !isFleet) {
       clearToken();
       window.dispatchEvent(new Event("ifd-unauthorized"));
     }
