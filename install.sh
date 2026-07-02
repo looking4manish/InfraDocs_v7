@@ -48,6 +48,15 @@ ROLE_OVERRIDE="${INFRADOCS_ROLE:-}"
 MODE="${INFRADOCS_MODE:-}"
 # Scripted reachable address: --advertise-url / INFRADOCS_ADVERTISE_URL bypasses the picker.
 ADVERTISE_OVERRIDE="${INFRADOCS_ADVERTISE_URL:-}"
+# Web/API ports — config default 8081/8090, overridable via env or --web-port/--api-port.
+# Preflighted for conflicts before bring-up so a busy port fails loudly / auto-suggests
+# instead of crash-looping the web container.
+WEB_PORT_SEL="${INFRADOCS_WEB_PORT:-8081}"
+API_PORT_SEL="${INFRADOCS_API_PORT:-8090}"
+# Interactive unless INFRADOCS_NONINTERACTIVE=1 or there is no TTY. =0 forces interactive.
+NONINTERACTIVE=0
+[[ "${INFRADOCS_NONINTERACTIVE:-}" == "1" ]] && NONINTERACTIVE=1
+[[ -z "${INFRADOCS_NONINTERACTIVE:-}" && ! -t 0 ]] && NONINTERACTIVE=1
 for arg in "$@"; do
   case "$arg" in
     --onboard=*)       ONBOARD="${arg#*=}" ;;
@@ -60,6 +69,10 @@ for arg in "$@"; do
     --normal)          MODE=normal ;;
     --advertise-url=*) ADVERTISE_OVERRIDE="${arg#*=}" ;;
     --advertise-url)   echo "use --advertise-url=http://HOST-OR-IP:PORT" >&2; exit 1 ;;
+    --web-port=*)      WEB_PORT_SEL="${arg#*=}" ;;
+    --web-port)        echo "use --web-port=N" >&2; exit 1 ;;
+    --api-port=*)      API_PORT_SEL="${arg#*=}" ;;
+    --api-port)        echo "use --api-port=N" >&2; exit 1 ;;
   esac
 done
 
@@ -69,6 +82,28 @@ warn() { printf "\033[1;33m  ! %s\033[0m\n" "$1"; }
 err()  { printf "\033[1;31m  ✗ %s\033[0m\n" "$1" >&2; }
 ask()  { local p="$1" d="${2:-}" v; if [[ -n "$d" ]]; then read -rp "  $p [$d]: " v; printf '%s' "${v:-$d}"; else read -rp "  $p: " v; printf '%s' "$v"; fi; }
 askyn(){ local v; read -rp "  $1 [y/N]: " v; [[ "$v" =~ ^[Yy] ]]; }
+
+PORT_RESULT=""
+# resolve_port LABEL PORT FLAGMSG — ensure PORT is free on this host before bring-up.
+#   free            -> PORT_RESULT=PORT
+#   taken + interactive     -> suggest the next free port (operator accepts / types one)
+#   taken + non-interactive -> die with a named reason (never silently bind something else)
+resolve_port() {
+  local label="$1" port="$2" flagmsg="$3" suggest ans
+  while :; do
+    if "${HELP[@]}" port-check --port "$port" >/dev/null 2>&1; then
+      PORT_RESULT="$port"; return 0
+    fi
+    suggest="$("${HELP[@]}" find-free-port --from "$port" 2>/dev/null || true)"
+    if [[ "$NONINTERACTIVE" == "1" ]]; then
+      die "$label port $port is already in use on this host (by another process/container) — choose a different port with $flagmsg${suggest:+ (e.g. $suggest is free)}"
+    fi
+    warn "$label port $port is already in use on this host."
+    ans="$(ask "use free $label port ${suggest:-<type one>}? accept the suggestion or type a port" "${suggest:-}")"
+    [[ -z "$ans" ]] && { err "a $label port is required"; continue; }
+    port="$ans"
+  done
+}
 
 # ask_required PROMPT — for onboarding fields that must not be empty. Re-prompts until a
 # non-empty value is given; 'q' (or EOF / no TTY) returns 1 so the caller can bail and
@@ -266,9 +301,16 @@ SERVER_ID="${INFRADOCS_SERVER_ID:-$(ask "Short node id (e.g. oci, n150)" "$(host
 [[ -n "$SERVER_ID" ]] || die "a node id is required"
 ok "node id = $SERVER_ID"
 
+# --- 3b. preflight the web + API ports BEFORE writing .env / bringing up -
+step "Preflight ports"
+resolve_port "web" "$WEB_PORT_SEL" "--web-port N or INFRADOCS_WEB_PORT=N"; WEB_PORT_SEL="$PORT_RESULT"
+resolve_port "API" "$API_PORT_SEL" "--api-port N or INFRADOCS_API_PORT=N"; API_PORT_SEL="$PORT_RESULT"
+ok "ports free — web $WEB_PORT_SEL, API $API_PORT_SEL"
+
 # --- 4. write the node config -------------------------------------------
 step "Write node config"
 export INSTALL_SERVER_ID="$SERVER_ID" INSTALL_SERVER_NAME="$SERVER_ID"
+export INSTALL_WEB_PORT="$WEB_PORT_SEL" INSTALL_API_PORT="$API_PORT_SEL"
 "${HELP[@]}" render-env --out "$DEPLOY_DIR/deploy/docker/.env" || die "failed to write deploy/docker/.env"
 chmod 600 "$DEPLOY_DIR/deploy/docker/.env"
 ok "wrote deploy/docker/.env"
@@ -290,15 +332,22 @@ done
 [[ "$(curl -s -o /dev/null -w '%{http_code}' "$LOCAL_API/api/health" 2>/dev/null)" == "200" ]] \
   || die "the local API never became healthy on $LOCAL_API"
 ok "API + Mongo healthy"
-printf "  waiting for the web UI"
+# The web container must be RUNNING (a port-bind failure => Restarting/Exited crash-loop),
+# not just "created", and must actually serve InfraDocs on WEB_PORT — not some OTHER process
+# that already holds the port (whose 200 would otherwise masquerade as a healthy UI).
+web_ps="$(cd "$DEPLOY_DIR/deploy/docker" && docker compose --env-file .env ps web 2>/dev/null || true)"
+if printf '%s' "$web_ps" | grep -qiE "restarting|exited|unhealthy"; then
+  die "web container is not running (state shows restarting/exited) — web port ${WEB_PORT} is likely already in use on this host. Re-run with --web-port N or INFRADOCS_WEB_PORT=N"
+fi
+printf "  waiting for the web UI on :${WEB_PORT}"
 for _ in $(seq 1 45); do
-  code="$(curl -s -o /dev/null -w '%{http_code}' "$LOCAL_WEB/" 2>/dev/null)"
-  [[ "$code" =~ ^(200|301|302|304)$ ]] && { echo; break; }
+  code="$(curl -s -o /dev/null -w '%{http_code}' "$LOCAL_WEB/api/health" 2>/dev/null)"
+  [[ "$code" == "200" ]] && { echo; break; }
   printf "."; sleep 2
 done
-code="$(curl -s -o /dev/null -w '%{http_code}' "$LOCAL_WEB/" 2>/dev/null)"
-[[ "$code" =~ ^(200|301|302|304)$ ]] \
-  || die "the web UI never became reachable on $LOCAL_WEB"
+code="$(curl -s -o /dev/null -w '%{http_code}' "$LOCAL_WEB/api/health" 2>/dev/null)"
+[[ "$code" == "200" ]] \
+  || die "the web UI on $LOCAL_WEB is not serving InfraDocs (HTTP $code) — is web port ${WEB_PORT} taken by another process? Re-run with --web-port N or INFRADOCS_WEB_PORT=N"
 # From here the build is GOOD — onboarding hiccups must never tear it down.
 STACK_HEALTHY=1
 ok "stack is up and healthy (API + Mongo + web)"
@@ -338,7 +387,7 @@ if [[ "$ONBOARD" == "cli" ]]; then
   if [[ "$ROLE" == "standalone" ]]; then
     # Single node: NO reachable address, NO peers/token, NO reachability check. Just configure.
     step "Configure standalone node"
-    if "${HELP[@]}" complete --api "$LOCAL_API" --user admin --password "$ADMIN_PW" \
+    if "${HELP[@]}" complete --api "$LOCAL_API" --web-port "$WEB_PORT" --user admin --password "$ADMIN_PW" \
          --role standalone --server-name "$SERVER_ID"; then
       PRIORITY=1
       ok "standalone node configured — runs locally, no cluster, no peers"
@@ -383,14 +432,14 @@ if [[ "$ONBOARD" == "cli" ]]; then
     step "Enroll this node"
     while :; do
       if [[ "$ROLE" == "secondary" ]]; then
-        if "${HELP[@]}" complete --api "$LOCAL_API" --user admin --password "$ADMIN_PW" \
+        if "${HELP[@]}" complete --api "$LOCAL_API" --web-port "$WEB_PORT" --user admin --password "$ADMIN_PW" \
              --role secondary --server-name "$SERVER_ID" --advertise-url "$ADVERTISE_URL" \
              --priority "$PRIORITY" --primary-url "$PRIMARY_URL" --join-token "$JOIN_TOKEN"; then
           ok "enrolled — reachability confirmed both directions"; break
         fi
         err "enrollment refused (reason above). The primary must reach this node back at $ADVERTISE_URL"
       else
-        if "${HELP[@]}" complete --api "$LOCAL_API" --user admin --password "$ADMIN_PW" \
+        if "${HELP[@]}" complete --api "$LOCAL_API" --web-port "$WEB_PORT" --user admin --password "$ADMIN_PW" \
              --role primary --server-name "$SERVER_ID" --advertise-url "$ADVERTISE_URL"; then
           ok "this node is the cluster primary"; break
         fi
