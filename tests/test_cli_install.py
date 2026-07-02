@@ -221,3 +221,42 @@ def test_deploy_invokes_deploy_sh_non_interactively():
     I.deploy("/repo", runner=runner, env={"PATH": "/usr/bin"})
     assert calls["cmd"] == ["bash", "/repo/deploy/docker/deploy.sh"]
     assert calls["env"]["INFRADOCS_NONINTERACTIVE"] == "1"
+
+
+# ----------------------- web/API port config + preflight helpers ------------
+
+def test_configured_web_port_flows_to_compose_and_advertised_address():
+    # SAME configured port must reach the compose mapping AND the advertised/enroll address.
+    env = I.render_env({"server_id": "n1", "web_port": 8091, "api_port": 8095})
+    assert "WEB_PORT=8091" in env and "DOMAIN=:8091" in env and "API_PORT=8095" in env  # compose
+    runner = _runner({"ip -j -4 addr": (0, _ipjson(("eth0", "10.0.0.5")))})
+    assert I.detect_addresses(8091, runner=runner)[0]["url"] == "http://10.0.0.5:8091"  # advertised
+    assert I.normalize_url("http://node.example", 8091) == "http://node.example:8091"   # enroll normalize
+
+
+def test_port_free_detects_bound_and_free_ports():
+    import socket
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 0)
+    s.bind(("0.0.0.0", 0)); s.listen(1)
+    taken = s.getsockname()[1]
+    try:
+        assert I._port_free(taken) is False        # a live listener is detected as taken
+    finally:
+        s.close()
+    free = I._find_free_port(20000, 500)
+    assert free is not None and I._port_free(free) is True
+    assert I._port_free(0) is False and I._port_free(70000) is False   # invalid ports
+
+
+def test_find_free_port_skips_occupied():
+    import socket
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 0)
+    s.bind(("0.0.0.0", 0)); s.listen(1)
+    taken = s.getsockname()[1]
+    try:
+        nxt = I._find_free_port(taken, 50)
+        assert nxt is not None and nxt > taken     # skips the occupied one, scans upward
+    finally:
+        s.close()

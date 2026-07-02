@@ -78,7 +78,10 @@ def sandbox(tmp_path):
     _write_exe(bindir / "sleep", "#!/usr/bin/env bash\nexit 0\n")
     _write_exe(
         bindir / "docker",
-        '#!/usr/bin/env bash\nprintf "docker %s\\n" "$*" >> "' + str(calls) + '"\nexit 0\n',
+        '#!/usr/bin/env bash\n'
+        'printf "docker %s\\n" "$*" >> "' + str(calls) + '"\n'
+        'case " $* " in *" ps"*) [[ -n "${STUB_WEB_STATE:-}" ]] && printf "web   %s\\n" "$STUB_WEB_STATE";; esac\n'
+        'exit 0\n',
     )
     _write_exe(
         bindir / "curl",
@@ -116,6 +119,10 @@ def sandbox(tmp_path):
         '  *" complete "*)       echo OK; exit 0 ;;\n'
         '  *" check-primary "*)  exit "${STUB_CHECK_PRIMARY_RC:-0}" ;;\n'
         '  *" check-priority "*) exit "${STUB_CHECK_PRIORITY_RC:-0}" ;;\n'
+        '  *" port-check "*)\n'
+        '    pv=""; nxt=0; for a in "$@"; do [[ $nxt == 1 ]] && { pv="$a"; nxt=0; }; [[ "$a" == "--port" ]] && nxt=1; done\n'
+        '    case " ${STUB_INUSE_PORTS:-} " in *" $pv "*) exit 3;; esac; exit 0 ;;\n'
+        '  *" find-free-port "*) echo "${STUB_FREE_PORT:-8091}"; exit 0 ;;\n'
         "esac\n"
         'exec "' + sys.executable + '" "$@"\n',
     )
@@ -364,3 +371,48 @@ def test_ui_wizard_prints_detected_addresses_not_placeholder(sandbox):
     assert "<this node's reachable address>" not in out, "placeholder must be gone"
     assert "http://100.70.18.9:8081" in out and "tailscale" in out       # detected top pick
     assert "http://localhost:8081" in out and "this host only" in out
+
+
+# ----------------------- web/API port preflight (bug: 8081 hardcoded) -------
+
+def test_port_in_use_detected_in_preflight_aborts_with_named_reason(sandbox):
+    r = _run(sandbox, extra_env={"INFRADOCS_NONINTERACTIVE": "1", "STUB_INUSE_PORTS": "8081"})
+    assert r.returncode != 0
+    both = r.stdout + r.stderr
+    assert "web port 8081 is already in use" in both and "--web-port" in both
+    assert "up -d" not in _calls(sandbox)   # never entered bring-up -> no crash-loop
+
+
+def test_interactive_auto_suggest_offers_next_free_port(sandbox):
+    r = _run(sandbox, stdin_text="8091\n",
+             extra_env={"INFRADOCS_NONINTERACTIVE": "0", "STUB_INUSE_PORTS": "8081",
+                        "STUB_FREE_PORT": "8091", "INFRADOCS_ONBOARD": "ui"})
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "web port 8081 is already in use" in (r.stdout + r.stderr)
+    env_txt = (sandbox["deploy_dir"] / "deploy" / "docker" / ".env").read_text()
+    assert "WEB_PORT=8091" in env_txt and "DOMAIN=:8091" in env_txt
+
+
+def test_noninteractive_honors_explicit_port_and_fails_on_taken_default(sandbox):
+    # explicit free port is honored end-to-end
+    r = _run(sandbox, extra_env={"INFRADOCS_NONINTERACTIVE": "1", "INFRADOCS_WEB_PORT": "8091",
+                                 "INFRADOCS_ONBOARD": "ui"})
+    assert r.returncode == 0, r.stdout + r.stderr
+    env_txt = (sandbox["deploy_dir"] / "deploy" / "docker" / ".env").read_text()
+    assert "WEB_PORT=8091" in env_txt and "DOMAIN=:8091" in env_txt
+    # default port taken + no override -> fail with the named reason, no bring-up
+    sandbox["calls"].write_text("")
+    r2 = _run(sandbox, extra_env={"INFRADOCS_NONINTERACTIVE": "1", "STUB_INUSE_PORTS": "8081"})
+    assert r2.returncode != 0
+    assert "web port 8081 is already in use" in (r2.stdout + r2.stderr)
+    assert "up -d" not in _calls(sandbox)
+
+
+def test_post_bringup_health_fails_when_web_container_not_serving(sandbox):
+    # Ports pass preflight, but the web container is Restarting (bind race / masquerade):
+    # the post-bring-up check must fail loudly, not report the stack "up".
+    r = _run(sandbox, extra_env={"INFRADOCS_NONINTERACTIVE": "1", "INFRADOCS_ONBOARD": "ui",
+                                 "STUB_WEB_STATE": "Restarting"})
+    assert r.returncode != 0
+    both = (r.stdout + r.stderr).lower()
+    assert "web container is not running" in both and "restarting" in both

@@ -230,6 +230,39 @@ def normalize_url(url, default_port: int = 8081) -> str:
     return urlunsplit(parts)
 
 
+def _port_free(port) -> bool:
+    """True iff we can bind 0.0.0.0:port right now (no other listener). Used by the installer
+    preflight so a busy web/API port is caught BEFORE bring-up, not after a crash-loop."""
+    import socket
+    try:
+        p = int(port)
+    except (TypeError, ValueError):
+        return False
+    if not (1 <= p <= 65535):
+        return False
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 0)
+    try:
+        sock.bind(("0.0.0.0", p))
+        return True
+    except OSError:
+        return False
+    finally:
+        sock.close()
+
+
+def _find_free_port(from_port, count: int = 50):
+    """First free port scanning upward from `from_port` (inclusive). None if none in range."""
+    try:
+        start = int(from_port)
+    except (TypeError, ValueError):
+        return None
+    for p in range(start, min(start + max(count, 1), 65536)):
+        if _port_free(p):
+            return p
+    return None
+
+
 # ----------------------- config rendering -----------------------------------
 
 
@@ -307,6 +340,9 @@ def _cli(argv=None) -> int:
     ck.add_argument("--primary-url", required=True); ck.add_argument("--priority", required=True)
     re = sub.add_parser("render-env"); re.add_argument("--out", default="-")
     da = sub.add_parser("detect-addresses"); da.add_argument("--web-port", default="8081")
+    pc = sub.add_parser("port-check"); pc.add_argument("--port", required=True)
+    ff = sub.add_parser("find-free-port"); ff.add_argument("--from", dest="from_port", required=True)
+    ff.add_argument("--count", type=int, default=50)
     co = sub.add_parser("complete")
     co.add_argument("--api", required=True); co.add_argument("--user", default="admin")
     co.add_argument("--password", default="Changeme001")
@@ -314,6 +350,7 @@ def _cli(argv=None) -> int:
     # advertise-url is required for primary/secondary (a clustered node needs a reachable
     # address) but NOT for standalone, which runs on one box with no federation.
     co.add_argument("--advertise-url")
+    co.add_argument("--web-port", default="8081")  # default port for a portless advertise/primary URL
     co.add_argument("--priority"); co.add_argument("--primary-url"); co.add_argument("--join-token")
 
     args = ap.parse_args(argv)
@@ -344,12 +381,22 @@ def _cli(argv=None) -> int:
         for c in detect_addresses(args.web_port):
             print(f"{c['url']}\t{c['label']}\t{c['kind']}")
         return 0
+    if args.cmd == "port-check":
+        return 0 if _port_free(args.port) else 3
+    if args.cmd == "find-free-port":
+        fp = _find_free_port(args.from_port, args.count)
+        if fp is None:
+            print("no free port found", file=sys.stderr)
+            return 1
+        print(fp)
+        return 0
     if args.cmd == "complete":
-        adv = normalize_url(args.advertise_url) if args.advertise_url else args.advertise_url
+        _dp = int(args.web_port) if str(args.web_port).isdigit() else 8081
+        adv = normalize_url(args.advertise_url, _dp) if args.advertise_url else args.advertise_url
         cfg = {"role": args.role, "server_name": args.server_name, "advertise_url": adv}
         if args.role == "secondary":
             cfg.update({"priority": args.priority,
-                        "primary_url": normalize_url(args.primary_url) if args.primary_url else args.primary_url,
+                        "primary_url": normalize_url(args.primary_url, _dp) if args.primary_url else args.primary_url,
                         "join_token": args.join_token})
         body = build_complete_body(cfg)
         ok, reason, directions = complete_setup(args.api, body, (args.user, args.password))
