@@ -2,8 +2,11 @@
 
 SAFETY MODEL (do not weaken without care — this destroys production state):
   - dry_run is the DEFAULT; execution requires confirm == project name (endpoint).
-  - REFUSES: non-project apps, the System bucket, and any project_dir that is not
-    exactly <projects_root>/<name> (so a bad path can never `rm -rf` the wrong dir).
+  - REFUSES: non-project apps, the System bucket, and any project_dir that fails the
+    STRUCTURAL catastrophe guards (root /, $HOME, a top-level dir, or a path that resolves
+    into a system tree like /etc,/usr,/var,…). It validates the app's OWN discovered
+    project_dir wherever it lives — NOT a single blessed root — with the blast-radius
+    preview + type-to-confirm as the operator gate.
   - SKIPS shared assets (an image/cert/volume another app needs) — never removed.
   - BACKS UP first to <projects_root>/backups/<project>/<timestamp>/. Backups are
     `critical` ops ordered before every deletion; if any backup fails the executor
@@ -35,15 +38,41 @@ def _vol_name(v: Any) -> str:
     return v.get("name") if isinstance(v, dict) else v
 
 
-def _safe_project_dir(app: Dict[str, Any], projects_root: str) -> Optional[str]:
-    """Return the project dir ONLY if it is exactly <projects_root>/<name>."""
-    pd = app.get("project_dir")
-    if not pd:
-        return None
-    p = Path(pd).resolve()
-    if p.parent == Path(projects_root).resolve() and p.name == app["name"]:
-        return str(p)
+# System trees a torn-down app dir can NEVER be (the path itself or anything under it).
+# This is the catastrophe backstop, NOT a project-root allow-list — real apps live under
+# any root (/home/data, /opt, /srv, /data, …) and are torn down where they actually are.
+_FORBIDDEN_TREES = ("/etc", "/usr", "/bin", "/sbin", "/lib", "/lib32", "/lib64",
+                    "/boot", "/proc", "/sys", "/dev", "/run", "/var")
+
+
+def _structural_refusal(project_dir: Optional[str]) -> Optional[str]:
+    """Reason to refuse rm -rf of `project_dir`, or None if structurally safe. Independent of
+    any blessed root: .resolve() normalises symlinks + .. so a path can't escape, then we
+    refuse only genuinely catastrophic targets — never a legitimate app dir wherever it lives."""
+    if not project_dir or not str(project_dir).strip():
+        return "project_dir is empty — refusing to remove anything"
+    p = Path(project_dir).resolve()
+    s = str(p)
+    if s == "/":
+        return "refusing to remove the filesystem root /"
+    if len([x for x in p.parts if x not in ("/", "")]) < 2:
+        return f"refusing to remove top-level directory {s} — a real app dir is at least two levels deep"
+    if p == Path(os.path.expanduser("~")).resolve():
+        return f"refusing to remove the home directory itself ({s})"
+    for t in _FORBIDDEN_TREES:
+        if s == t or s.startswith(t + "/"):
+            return f"refusing to remove {s}: it is inside the system tree {t}"
     return None
+
+
+def _teardown_dir(app: Dict[str, Any]) -> Optional[str]:
+    """The dir teardown may remove = the app's OWN discovered project_dir (the real host path
+    the scanner recorded, read via the /host mount), resolved — IF it passes the structural
+    catastrophe guards. No fixed-prefix rule: an app is torn down wherever it truly lives."""
+    pd = app.get("project_dir")
+    if not pd or _structural_refusal(pd):
+        return None
+    return str(Path(pd).resolve())
 
 
 def build_plan(
@@ -57,12 +86,12 @@ def build_plan(
     if name == "System":
         refusals.append("refusing to tear down the System bucket")
 
-    safe_dir = _safe_project_dir(app, projects_root)
-    if app.get("project_dir") and not safe_dir:
-        refusals.append(
-            f"project_dir {app.get('project_dir')} is not {projects_root}/{name} "
-            "— refusing to remove it"
-        )
+    safe_dir = _teardown_dir(app)
+    pd = app.get("project_dir")
+    if pd and not safe_dir:
+        # Only a structurally-dangerous dir is refused now — NOT merely living outside a
+        # blessed root. The discovered dir + blast-radius preview + type-to-confirm are the gate.
+        refusals.append(_structural_refusal(pd) or f"project_dir {pd} could not be validated for removal")
 
     br = compute_blast_radius(app, all_apps)
     shared = {i["name"] for i in br["items"] if i["shared"]}
@@ -171,12 +200,11 @@ def _run_op(op: Dict[str, Any], backup_dir: str, projects_root: str, name: str) 
     if t == "remove_volume":
         return _run(["docker", "volume", "rm", tgt])
     if t == "remove_dir":
-        # Defense in depth: re-validate the path right before rm -rf.
-        p = Path(tgt).resolve()
-        if p.parent != Path(projects_root).resolve() or p.name != name:
-            return {"status": "failed", "rc": None, "stdout": "",
-                    "stderr": f"refusing rm -rf {tgt}: not {projects_root}/{name}"}
-        return _run(["rm", "-rf", tgt], timeout=120)
+        # Defense in depth: re-run the structural catastrophe guard right before rm -rf.
+        reason = _structural_refusal(tgt)
+        if reason:
+            return {"status": "failed", "rc": None, "stdout": "", "stderr": f"refusing rm -rf {tgt}: {reason}"}
+        return _run(["rm", "-rf", str(Path(tgt).resolve())], timeout=120)
     return {"status": "failed", "rc": None, "stdout": "", "stderr": f"unknown op {t}"}
 
 
@@ -204,7 +232,19 @@ def execute_plan(
         if op.get("critical") and r["status"] != "success":
             aborted = True
             row["detail"] = "BACKUP FAILED — aborting teardown, no deletion performed"
-    return {"project": name, "backup_dir": backup_dir, "aborted": aborted, "results": results}
+    summary = {
+        "removed_stopped": [{"op": r["op"], "target": r["target"]}
+                            for r in results if r.get("destructive") and r.get("status") == "success"],
+        "backed_up": [r["target"] for r in results
+                      if str(r["op"]).startswith("backup") and r.get("status") == "success"],
+        "skipped_shared": plan.get("skipped", []),
+        "failed": [{"op": r["op"], "target": r["target"],
+                    "reason": (r.get("detail") or r.get("stderr") or "").strip()[:300]}
+                   for r in results if r.get("status") == "failed"],
+    }
+    summary["ok"] = (not aborted) and not summary["failed"]
+    return {"project": name, "backup_dir": backup_dir, "aborted": aborted,
+            "results": results, "summary": summary}
 
 
 def _audit(db, actor: str, name: str, op: Dict[str, Any], r: Dict[str, Any]) -> None:
