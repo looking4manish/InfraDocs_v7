@@ -5,6 +5,7 @@ import { endpoints, isAuthed, clearToken } from "./api/client";
 import { Login, ChangePassword } from "./pages/Login";
 import Setup from "./pages/Setup";
 import Header from "./components/Header";
+import FleetBanner from "./components/FleetBanner";
 import DrawerProvider from "./components/DrawerProvider";
 import CommandPalette from "./components/CommandPalette";
 import LensHome from "./pages/LensHome";
@@ -32,6 +33,7 @@ function AppShell() {
       <Header />
       <div className="flex-1 flex overflow-hidden">
         <main className="flex-1 overflow-y-auto">
+          <div className="px-6 pt-5"><FleetBanner /></div>
           <AnimatePresence mode="wait" initial={false}>
             <motion.div
               key={location.pathname}

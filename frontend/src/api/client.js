@@ -1,4 +1,5 @@
 import axios from "axios";
+import { getSelectedNode, isLeaderSelected } from "../lib/fleet";
 
 // Session-token auth: login → opaque token → sent as `Authorization: Bearer`.
 // No credentials ever live in the JS bundle or persist beyond the token.
@@ -25,6 +26,18 @@ export const api = axios.create({
 api.interceptors.request.use((config) => {
   const t = getToken();
   if (t) config.headers.Authorization = `Bearer ${t}`;
+  return config;
+});
+
+// Fleet node-switcher: when viewing a NON-leader node, repoint the data lenses through the
+// primary-side proxy (/api/fleet/<node>/...). Only lens/data + action routes are repointed;
+// auth/setup/cluster/fleet/federation/health always hit the node actually serving the UI.
+const FLEET_LENS = /^\/api\/(applications|assets|projects|ports|storage|scans|endpoints|ai)(\/|\?|$)/;
+api.interceptors.request.use((config) => {
+  const node = getSelectedNode();
+  if (node && !isLeaderSelected() && typeof config.url === "string" && FLEET_LENS.test(config.url)) {
+    config.url = `/api/fleet/${encodeURIComponent(node)}${config.url}`;
+  }
   return config;
 });
 
@@ -74,6 +87,7 @@ export const endpoints = {
   federationServers: () => api.get("/api/federation/servers"),
   mintFederationToken: (server_id) =>
     api.post("/api/federation/tokens", { server_id }),
+  fleetNodes: () => api.get("/api/fleet/nodes"),
   clusterState: () => api.get("/api/cluster/state"),
   clusterPromote: (force = false) =>
     api.post("/api/cluster/promote", { force }),

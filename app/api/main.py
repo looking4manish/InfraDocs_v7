@@ -17,7 +17,7 @@ from app import cluster as CC  # noqa: E402
 from app import cluster_manager as _cluster  # noqa: E402
 from app.api.dependencies import get_config, get_db  # noqa: E402
 from app.api.routers import (  # noqa: E402
-    actions, ai, applications, assets, auth, cluster, endpoints, federation, health, ports, projects, scans, setup, storage,
+    actions, ai, applications, assets, auth, cluster, endpoints, federation, fleet, health, ports, projects, scans, setup, storage,
 )
 from app.core.logger import setup_logger  # noqa: E402
 
@@ -67,6 +67,7 @@ app.include_router(endpoints.router, prefix="/api/endpoints", tags=["endpoints"]
 app.include_router(ai.router, prefix="/api/ai", tags=["ai"])
 app.include_router(federation.router, prefix="/api/federation", tags=["federation"])
 app.include_router(cluster.router, prefix="/api/cluster", tags=["cluster"])
+app.include_router(fleet.router, prefix="/api/fleet", tags=["fleet"])
 app.include_router(assets.router, prefix="/api/assets", tags=["assets"])
 app.include_router(projects.router, prefix="/api/projects", tags=["projects"])
 app.include_router(applications.router, prefix="/api/applications", tags=["applications"])

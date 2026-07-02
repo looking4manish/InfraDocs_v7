@@ -9,6 +9,8 @@ import {
 } from "../lib/attention";
 import { useDrawer } from "./DrawerProvider";
 import ThemeSwitcher from "./ThemeSwitcher";
+import NodeSwitcher from "./NodeSwitcher";
+import { useSelectedNode } from "../lib/fleet";
 
 function openPalette() {
   window.dispatchEvent(new KeyboardEvent("keydown", { key: "k", metaKey: true }));
@@ -40,6 +42,14 @@ export default function Header() {
     queryFn: () => endpoints.health().then((r) => r.data),
     staleTime: 300000,
   });
+  const selNode = useSelectedNode();
+  const fleet = useQuery({
+    queryKey: ["fleet-nodes"],
+    queryFn: () => endpoints.fleetNodes().then((r) => r.data),
+    refetchInterval: 5000,
+  });
+  const _fcur = selNode || fleet.data?.leader;
+  const fleetStale = !!(fleet.data?.nodes || []).find((n) => n.node_id === _fcur && !n.reachable);
   const serverName = health.data?.server_name || health.data?.server || "server";
 
   const lastScanAt = parseScanTime(
@@ -60,6 +70,8 @@ export default function Header() {
         <span className="text-[15px] font-semibold tracking-tight text-zinc-50">InfraDocs</span>
         <span className="text-[11px] text-zinc-500 group-hover:text-accent-soft font-mono transition">v7</span>
       </button>
+
+      <NodeSwitcher />
 
       <span className={cn(
         "inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-medium",
@@ -158,7 +170,8 @@ export default function Header() {
 
       <button
         onClick={() => triggerScan.mutate()}
-        disabled={triggerScan.isPending}
+        disabled={triggerScan.isPending || fleetStale}
+        title={fleetStale ? "node unreachable — actions unavailable" : "Scan the selected node"}
         className="inline-flex items-center gap-1.5 bg-accent hover:bg-accent-dim text-bg-base text-sm font-semibold px-3 py-1.5 rounded-md disabled:opacity-50 transition"
       >
         <RefreshCw size={14} className={cn(triggerScan.isPending && "animate-spin")} />

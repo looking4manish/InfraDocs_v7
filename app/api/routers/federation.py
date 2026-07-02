@@ -117,6 +117,7 @@ def ingest(
         {"$set": {
             "server_id": sid,
             "last_seen": datetime.now(timezone.utc),
+            "last_synced_at": datetime.now(timezone.utc),
             "asset_count": len(assets),
             "app_count": len(apps),
         }},
