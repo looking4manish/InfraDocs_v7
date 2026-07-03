@@ -122,7 +122,7 @@ def sandbox(tmp_path):
         '  *" port-check "*)\n'
         '    pv=""; nxt=0; for a in "$@"; do [[ $nxt == 1 ]] && { pv="$a"; nxt=0; }; [[ "$a" == "--port" ]] && nxt=1; done\n'
         '    case " ${STUB_INUSE_PORTS:-} " in *" $pv "*) exit 3;; esac; exit 0 ;;\n'
-        '  *" find-free-port "*) echo "${STUB_FREE_PORT:-8091}"; exit 0 ;;\n'
+        '  *" find-free-port "*) [[ -n "${STUB_NO_FREE:-}" ]] && exit 1; echo "${STUB_FREE_PORT:-8091}"; exit 0 ;;\n'
         "esac\n"
         'exec "' + sys.executable + '" "$@"\n',
     )
@@ -373,39 +373,55 @@ def test_ui_wizard_prints_detected_addresses_not_placeholder(sandbox):
     assert "http://localhost:8081" in out and "this host only" in out
 
 
-# ----------------------- web/API port preflight (bug: 8081 hardcoded) -------
+# ----------------------- web/API port auto-pick (default, both modes) -------
 
-def test_port_in_use_detected_in_preflight_aborts_with_named_reason(sandbox):
-    r = _run(sandbox, extra_env={"INFRADOCS_NONINTERACTIVE": "1", "STUB_INUSE_PORTS": "8081"})
+def test_default_taken_noninteractive_auto_advances_and_binds(sandbox):
+    # Default 8081 taken, NO override, non-interactive: auto-advance + bind, no abort/prompt.
+    r = _run(sandbox, extra_env={"INFRADOCS_NONINTERACTIVE": "1", "STUB_INUSE_PORTS": "8081",
+                                 "STUB_FREE_PORT": "8091", "INFRADOCS_ONBOARD": "ui"})
+    assert r.returncode == 0, r.stdout + r.stderr
+    env_txt = (sandbox["deploy_dir"] / "deploy" / "docker" / ".env").read_text()
+    assert "WEB_PORT=8091" in env_txt and "DOMAIN=:8091" in env_txt   # bound the auto-chosen port
+    assert "auto-selected 8091" in (r.stdout + r.stderr)
+
+
+def test_auto_chosen_port_propagates_to_advertised_enroll_address(sandbox):
+    # The auto-chosen 8091 must reach the enroll/advertise threading (complete --web-port /
+    # detect-addresses --web-port), so the advertised address matches the bound port.
+    r = _run(sandbox, extra_env={"INFRADOCS_NONINTERACTIVE": "1", "STUB_INUSE_PORTS": "8081",
+                                 "STUB_FREE_PORT": "8091", "INFRADOCS_ONBOARD": "cli",
+                                 "INFRADOCS_ROLE": "standalone"})
+    assert r.returncode == 0, r.stdout + r.stderr
+    calls = _calls(sandbox)
+    assert "complete " in calls and "--web-port 8091" in calls
+
+
+def test_explicit_web_port_taken_fails_with_named_reason(sandbox):
+    # Explicit request for a taken port FAILS loudly — auto-pick must NOT override it.
+    r = _run(sandbox, extra_env={"INFRADOCS_NONINTERACTIVE": "1", "INFRADOCS_WEB_PORT": "8081",
+                                 "STUB_INUSE_PORTS": "8081"})
     assert r.returncode != 0
     both = r.stdout + r.stderr
-    assert "web port 8081 is already in use" in both and "--web-port" in both
-    assert "up -d" not in _calls(sandbox)   # never entered bring-up -> no crash-loop
-
-
-def test_interactive_auto_suggest_offers_next_free_port(sandbox):
-    r = _run(sandbox, stdin_text="8091\n",
-             extra_env={"INFRADOCS_NONINTERACTIVE": "0", "STUB_INUSE_PORTS": "8081",
-                        "STUB_FREE_PORT": "8091", "INFRADOCS_ONBOARD": "ui"})
-    assert r.returncode == 0, r.stdout + r.stderr
-    assert "web port 8081 is already in use" in (r.stdout + r.stderr)
-    env_txt = (sandbox["deploy_dir"] / "deploy" / "docker" / ".env").read_text()
-    assert "WEB_PORT=8091" in env_txt and "DOMAIN=:8091" in env_txt
-
-
-def test_noninteractive_honors_explicit_port_and_fails_on_taken_default(sandbox):
-    # explicit free port is honored end-to-end
-    r = _run(sandbox, extra_env={"INFRADOCS_NONINTERACTIVE": "1", "INFRADOCS_WEB_PORT": "8091",
-                                 "INFRADOCS_ONBOARD": "ui"})
-    assert r.returncode == 0, r.stdout + r.stderr
-    env_txt = (sandbox["deploy_dir"] / "deploy" / "docker" / ".env").read_text()
-    assert "WEB_PORT=8091" in env_txt and "DOMAIN=:8091" in env_txt
-    # default port taken + no override -> fail with the named reason, no bring-up
-    sandbox["calls"].write_text("")
-    r2 = _run(sandbox, extra_env={"INFRADOCS_NONINTERACTIVE": "1", "STUB_INUSE_PORTS": "8081"})
-    assert r2.returncode != 0
-    assert "web port 8081 is already in use" in (r2.stdout + r2.stderr)
+    assert "explicitly requested" in both and "8081" in both
+    assert "auto-selected" not in both              # did NOT silently pick another
     assert "up -d" not in _calls(sandbox)
+
+
+def test_no_free_port_in_range_fails_with_named_reason(sandbox):
+    # Default taken and nothing free in range -> named failure, not an infinite loop.
+    r = _run(sandbox, extra_env={"INFRADOCS_NONINTERACTIVE": "1", "STUB_INUSE_PORTS": "8081",
+                                 "STUB_NO_FREE": "1"})
+    assert r.returncode != 0
+    assert "no free port was found in range" in (r.stdout + r.stderr)
+    assert "up -d" not in _calls(sandbox)
+
+
+def test_auto_selected_log_line_is_emitted(sandbox):
+    r = _run(sandbox, extra_env={"INFRADOCS_NONINTERACTIVE": "1", "STUB_INUSE_PORTS": "8081",
+                                 "STUB_FREE_PORT": "8091", "INFRADOCS_ONBOARD": "ui"})
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "web port 8081 in use" in r.stdout
+    assert "auto-selected 8091 (serving on :8091)" in r.stdout
 
 
 def test_post_bringup_health_fails_when_web_container_not_serving(sandbox):
