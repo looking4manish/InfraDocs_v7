@@ -51,8 +51,10 @@ ADVERTISE_OVERRIDE="${INFRADOCS_ADVERTISE_URL:-}"
 # Web/API ports — config default 8081/8090, overridable via env or --web-port/--api-port.
 # Preflighted for conflicts before bring-up so a busy port fails loudly / auto-suggests
 # instead of crash-looping the web container.
-WEB_PORT_SEL="${INFRADOCS_WEB_PORT:-8081}"
-API_PORT_SEL="${INFRADOCS_API_PORT:-8090}"
+WEB_PORT_SEL="${INFRADOCS_WEB_PORT:-8081}"; WEB_EXPLICIT=0; [[ -n "${INFRADOCS_WEB_PORT:-}" ]] && WEB_EXPLICIT=1
+API_PORT_SEL="${INFRADOCS_API_PORT:-8090}"; API_EXPLICIT=0; [[ -n "${INFRADOCS_API_PORT:-}" ]] && API_EXPLICIT=1
+# Auto-pick scans upward from the default and binds the first free port, capped at this ceiling.
+PORT_CEIL="${INFRADOCS_PORT_CEIL:-8099}"
 # Interactive unless INFRADOCS_NONINTERACTIVE=1 or there is no TTY. =0 forces interactive.
 NONINTERACTIVE=0
 [[ "${INFRADOCS_NONINTERACTIVE:-}" == "1" ]] && NONINTERACTIVE=1
@@ -69,9 +71,9 @@ for arg in "$@"; do
     --normal)          MODE=normal ;;
     --advertise-url=*) ADVERTISE_OVERRIDE="${arg#*=}" ;;
     --advertise-url)   echo "use --advertise-url=http://HOST-OR-IP:PORT" >&2; exit 1 ;;
-    --web-port=*)      WEB_PORT_SEL="${arg#*=}" ;;
+    --web-port=*)      WEB_PORT_SEL="${arg#*=}"; WEB_EXPLICIT=1 ;;
     --web-port)        echo "use --web-port=N" >&2; exit 1 ;;
-    --api-port=*)      API_PORT_SEL="${arg#*=}" ;;
+    --api-port=*)      API_PORT_SEL="${arg#*=}"; API_EXPLICIT=1 ;;
     --api-port)        echo "use --api-port=N" >&2; exit 1 ;;
   esac
 done
@@ -84,25 +86,27 @@ ask()  { local p="$1" d="${2:-}" v; if [[ -n "$d" ]]; then read -rp "  $p [$d]: 
 askyn(){ local v; read -rp "  $1 [y/N]: " v; [[ "$v" =~ ^[Yy] ]]; }
 
 PORT_RESULT=""
-# resolve_port LABEL PORT FLAGMSG — ensure PORT is free on this host before bring-up.
-#   free            -> PORT_RESULT=PORT
-#   taken + interactive     -> suggest the next free port (operator accepts / types one)
-#   taken + non-interactive -> die with a named reason (never silently bind something else)
+# resolve_port LABEL PORT EXPLICIT FLAGMSG — pick the port to bind, before bring-up.
+#   free                      -> PORT_RESULT=PORT
+#   taken + explicit request  -> die (they asked for THAT port; don't silently pick another)
+#   taken + default (either mode, incl. non-interactive) -> AUTO-SELECT the next free port in
+#                                the 80xx range and bind it, unattended
+#   taken + none free <= ceil -> die with a named reason (never loop forever)
 resolve_port() {
-  local label="$1" port="$2" flagmsg="$3" suggest ans
-  while :; do
-    if "${HELP[@]}" port-check --port "$port" >/dev/null 2>&1; then
-      PORT_RESULT="$port"; return 0
-    fi
-    suggest="$("${HELP[@]}" find-free-port --from "$port" 2>/dev/null || true)"
-    if [[ "$NONINTERACTIVE" == "1" ]]; then
-      die "$label port $port is already in use on this host (by another process/container) — choose a different port with $flagmsg${suggest:+ (e.g. $suggest is free)}"
-    fi
-    warn "$label port $port is already in use on this host."
-    ans="$(ask "use free $label port ${suggest:-<type one>}? accept the suggestion or type a port" "${suggest:-}")"
-    [[ -z "$ans" ]] && { err "a $label port is required"; continue; }
-    port="$ans"
-  done
+  local label="$1" port="$2" explicit="$3" flagmsg="$4" picked cnt
+  if "${HELP[@]}" port-check --port "$port" >/dev/null 2>&1; then
+    PORT_RESULT="$port"; return 0
+  fi
+  if [[ "$explicit" == "1" ]]; then
+    die "$label port $port was explicitly requested but is already in use on this host (by another process/container) — free it, or choose another with $flagmsg"
+  fi
+  cnt=$(( PORT_CEIL - port + 1 )); (( cnt < 1 )) && cnt=20
+  picked="$("${HELP[@]}" find-free-port --from "$port" --count "$cnt" 2>/dev/null || true)"
+  if [[ -z "$picked" ]]; then
+    die "$label port $port is in use and no free port was found in range ${port}-${PORT_CEIL} — free a port, or set $flagmsg"
+  fi
+  ok "$label port $port in use → auto-selected $picked (serving on :$picked)"
+  PORT_RESULT="$picked"
 }
 
 # ask_required PROMPT — for onboarding fields that must not be empty. Re-prompts until a
@@ -303,8 +307,8 @@ ok "node id = $SERVER_ID"
 
 # --- 3b. preflight the web + API ports BEFORE writing .env / bringing up -
 step "Preflight ports"
-resolve_port "web" "$WEB_PORT_SEL" "--web-port N or INFRADOCS_WEB_PORT=N"; WEB_PORT_SEL="$PORT_RESULT"
-resolve_port "API" "$API_PORT_SEL" "--api-port N or INFRADOCS_API_PORT=N"; API_PORT_SEL="$PORT_RESULT"
+resolve_port "web" "$WEB_PORT_SEL" "$WEB_EXPLICIT" "--web-port N or INFRADOCS_WEB_PORT=N"; WEB_PORT_SEL="$PORT_RESULT"
+resolve_port "API" "$API_PORT_SEL" "$API_EXPLICIT" "--api-port N or INFRADOCS_API_PORT=N"; API_PORT_SEL="$PORT_RESULT"
 ok "ports free — web $WEB_PORT_SEL, API $API_PORT_SEL"
 
 # --- 4. write the node config -------------------------------------------
