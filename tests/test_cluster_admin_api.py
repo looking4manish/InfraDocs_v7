@@ -123,3 +123,76 @@ def test_admin_endpoints_require_auth(client):
     assert client.post("/api/cluster/to-primary", json={"priority": 1}).status_code == 401
     assert client.get("/api/cluster/audit").status_code == 401
     assert client.post("/api/cluster/evict", json={"node_id": "x", "confirm_hostname": "x"}).status_code == 401
+
+
+# ---- Primary/Standalone -> Secondary via the shared enrol path (join an existing primary) ----
+
+def _make_primary(client):
+    assert client.post("/api/cluster/to-primary", auth=AUTH, json={"priority": 1}).status_code == 200
+
+
+def test_lone_primary_joins_via_shared_enroll_and_stores_fleet_secret(client, db, monkeypatch):
+    _make_primary(client)
+    seen = {}
+
+    def fake(primary_url, advertise_url, join_token, server_id, priority, timeout=10):
+        seen["server_id"] = server_id  # proves it went through the SAME enrol path (cli_install)
+        return {"ok": True, "fleet_secret": "SEC-1",
+                "directions": {"secondary_to_primary": True, "primary_to_secondary": True}}
+
+    monkeypatch.setattr("app.federation.enroll_with_primary", fake)
+    r = client.post("/api/cluster/join", auth=AUTH, json={
+        "primary_url": "http://100.107.140.36:8081", "join_token": "tok",
+        "advertise_url": "http://thisnode:8081", "priority": 2})
+    assert r.status_code == 200 and r.json()["role"] == "secondary" and r.json()["from_role"] == "primary"
+    assert seen["server_id"] == NODE_ID
+    assert db.db.cluster.find_one({"_id": "self"})["is_primary"] is False
+    assert db.db.fleet.find_one({"_id": "config"})["secret"] == "SEC-1"   # shared fleet secret received + stored
+
+
+def test_join_from_primary_with_dependents_is_orphan_guarded(client, db, monkeypatch):
+    _make_primary(client)
+    db.db.cluster_nodes.insert_one({"node_id": "n2", "priority": 2, "address": "http://n2"})
+    body = {"primary_url": "http://p:8081", "join_token": "t", "advertise_url": "http://me:8081", "priority": 3}
+    soft = client.post("/api/cluster/join", auth=AUTH, json=body)
+    assert soft.status_code == 200 and soft.json()["needs_force"] is True and soft.json()["dependents"] == ["n2"]
+    bad = client.post("/api/cluster/join", auth=AUTH, json={**body, "force": True, "confirm_hostname": "wrong"})
+    assert bad.status_code == 400
+    assert db.db.cluster.find_one({"_id": "self"})["is_primary"] is True   # NOT transitioned on a bad confirm
+
+
+def test_join_refused_when_override_pinned(client, db, monkeypatch):
+    _make_primary(client)
+    client.post("/api/cluster/override", auth=AUTH, json={"value": True})
+    r = client.post("/api/cluster/join", auth=AUTH, json={
+        "primary_url": "http://p:8081", "join_token": "t", "advertise_url": "http://me:8081", "priority": 2})
+    assert r.status_code == 409
+    assert "override" in r.json()["detail"]["reason"].lower()
+    assert db.db.cluster.find_one({"_id": "self"})["is_primary"] is True
+
+
+def test_join_enroll_failure_reports_reason_and_leaves_prior_role(client, db, monkeypatch):
+    _make_primary(client)
+    monkeypatch.setattr("app.federation.enroll_with_primary",
+                        lambda *a, **k: {"ok": False, "reason": "priority 2 already in use (by 'oci')",
+                                         "directions": {"secondary_to_primary": True, "primary_to_secondary": None}})
+    r = client.post("/api/cluster/join", auth=AUTH, json={
+        "primary_url": "http://p:8081", "join_token": "t", "advertise_url": "http://me:8081", "priority": 2})
+    assert r.status_code == 400 and "already in use" in r.json()["detail"]["reason"]
+    assert db.db.cluster.find_one({"_id": "self"})["is_primary"] is True   # prior role intact — no half-transition
+    assert db.db.fleet.find_one({"_id": "config"}) is None                 # no fleet secret stored
+
+
+def test_post_join_role_is_secondary_targeting_new_leader(client, db, monkeypatch):
+    _make_primary(client)
+    monkeypatch.setattr("app.federation.enroll_with_primary",
+                        lambda *a, **k: {"ok": True, "fleet_secret": "SEC-2",
+                                         "directions": {"secondary_to_primary": True, "primary_to_secondary": True}})
+    client.post("/api/cluster/join", auth=AUTH, json={
+        "primary_url": "http://100.107.140.36:8081", "join_token": "t",
+        "advertise_url": "http://me:8081", "priority": 4})
+    st = client.get("/api/cluster/state", auth=AUTH).json()
+    assert st["role"] == "secondary"
+    assert db.db.cluster.find_one({"_id": "self"})["is_primary"] is False
+    assert db.db.settings.find_one({"_id": "app"}).get("primary_node") is None     # redirect gate follows the leader
+    assert db.db.fleet.find_one({"_id": "config"})["primary_url"] == "http://100.107.140.36:8081"  # targets new primary

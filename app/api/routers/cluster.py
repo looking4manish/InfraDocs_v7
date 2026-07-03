@@ -318,32 +318,64 @@ class JoinRequest(BaseModel):
     join_token: str
     advertise_url: str
     priority: int
+    force: bool = False                       # confirm orphaning our own secondaries
+    confirm_hostname: Optional[str] = ""      # must equal this node's id when force-orphaning
 
 
 @router.post("/join")
 async def join(req: JoinRequest, request: Request, actor: str = Depends(verify_auth),
          cfg: Config = Depends(get_config), db: DBManager = Depends(get_db)):
-    """Standalone -> Secondary. Reuses the installer's canonical enroll path verbatim
-    (setup.enroll_secondary -> federation.enroll_with_primary -> primary /enroll), so this
-    can never drift from cli_install.py. On success, enable the cluster + start gossip."""
+    """Standalone OR Primary -> Secondary. Reuses the installer's canonical enroll path
+    verbatim (setup.enroll_secondary -> federation.enroll_with_primary -> primary /enroll),
+    so it can never drift from cli_install.py and it receives+stores the shared fleet secret.
+    A PRIMARY joining LEAVES its own cluster: refuse while override is pinned, and orphan-guard
+    (type-id-to-confirm) if it still has enrolled secondaries. This node's role changes ONLY
+    after enrol succeeds, so a bad token / unreachable / priority clash leaves it in its prior role."""
     node_id = cfg.server.id
     role = _role(db)
-    if role == "primary":
-        raise HTTPException(status_code=409, detail="demote to standalone before joining as a secondary")
+    s = _self(db)
+    if role == "secondary":
+        raise HTTPException(status_code=409, detail="this node is already a secondary")
     if not (1 <= req.priority <= 99):
         raise HTTPException(status_code=400, detail="priority must be between 1 and 99")
+    # override/pin guard — a pinned primary must be un-pinned first
+    if bool(s.get("override")):
+        _audit(db, actor, "join", role, "secondary", node_id, "refused", "override pinned")
+        raise HTTPException(status_code=409, detail={"message": "blocked",
+            "reason": "override/pin is set on this node — clear it before joining another primary"})
+    # orphan guard — a primary with its own enrolled secondaries would orphan them (same hazard
+    # as Primary->Standalone). Lone primary / standalone: no dependents, proceed after enrol.
+    dependents = []
+    if role == "primary":
+        tomb = _tombstones(db)
+        roster = [n for n in _roster(db) if n["node_id"] not in tomb and n["node_id"] != node_id]
+        okdep, dependents, reason = CC.can_go_standalone(roster)
+        if not okdep and not req.force:
+            _audit(db, actor, "join", role, "secondary", node_id, "needs_force", reason)
+            return {"ok": False, "needs_force": True, "dependents": dependents, "reason": reason,
+                    "confirm": f"type this node's id ('{node_id}') to confirm orphaning "
+                               f"{len(dependents)} node(s) and joining {req.primary_url}"}
+        if not okdep and req.force and req.confirm_hostname != node_id:
+            raise HTTPException(status_code=400,
+                                detail=f"confirm_hostname must equal '{node_id}' to force-orphan {len(dependents)} node(s)")
+    # SHARED enrol path: bidirectional reachability + fleet-secret delivery. Nothing about this
+    # node's role changes until it returns ok, so a failure never half-transitions/wedges it.
     result = enroll_secondary(db, node_id, req.primary_url, req.join_token, req.advertise_url, req.priority)
     if not result.get("ok"):
         _audit(db, actor, "join", role, "secondary", node_id, "refused", result.get("reason"))
-        # reversible: nothing persisted on failure — operator can re-submit with fixes.
         raise HTTPException(status_code=400, detail={"message": "enrollment refused",
                             "directions": result.get("directions", {}), "reason": result.get("reason")})
+    if role == "primary":
+        db.db.cluster_nodes.delete_many({})  # drop our OWN old roster; the new primary gossips the real one
     _set_self(db, {"cluster_enabled": True})
     _set_role(db, "secondary")
+    db.db.settings.update_one({"_id": "app"}, {"$set": {"primary_node": None}}, upsert=True)  # redirect gate follows the new leader
     MGR.start_gossip(request.app, cfg, db, _gossip_logger(request))
     _audit(db, actor, "join", role, "secondary", node_id, "ok",
-           f"enrolled with {req.primary_url} at priority {req.priority}")
-    return {"ok": True, "role": "secondary", "directions": result.get("directions")}
+           f"joined {req.primary_url} as secondary at priority {req.priority}"
+           + (f", orphaned {len(dependents)} node(s)" if dependents else ""))
+    return {"ok": True, "role": "secondary", "from_role": role, "primary_url": req.primary_url,
+            "orphaned": dependents, "directions": result.get("directions")}
 
 
 @router.post("/demote")

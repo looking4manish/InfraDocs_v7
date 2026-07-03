@@ -157,7 +157,7 @@ export default function AdminCluster() {
             {role === "standalone" && (
               <div className="flex flex-col gap-5">
                 <StandaloneToPrimary onGo={(p) => toPrimary.mutate(p)} busy={toPrimary.isPending} />
-                <JoinCluster onGo={(b) => join.mutate(b)} busy={join.isPending} />
+                <JoinCluster d={d} sourceRole="standalone" onGo={(b) => join.mutate(b)} busy={join.isPending} />
               </div>
             )}
             {role === "secondary" && (
@@ -174,6 +174,7 @@ export default function AdminCluster() {
                     <span className="text-[13px] text-amber-300 leading-relaxed">Blocked: {g.demote_blocked_reason}</span>}
                 </Control>
                 <PrimaryToStandalone d={d} onGo={(b) => toStandalone.mutate(b)} busy={toStandalone.isPending} />
+                <JoinCluster d={d} sourceRole="primary" onGo={(b) => join.mutate(b)} busy={join.isPending} />
                 <Control help={d.override
                   ? "Elections are frozen on the current primary — no automatic failover until you clear this."
                   : "Freeze elections on the current primary so no automatic failover happens (a manual pin)."}>
@@ -295,24 +296,67 @@ function StandaloneToPrimary({ onGo, busy }) {
   );
 }
 
-function JoinCluster({ onGo, busy }) {
+function JoinCluster({ d, sourceRole, onGo, busy }) {
   const [f, setF] = useState({ primary_url: "", join_token: "", advertise_url: "", priority: 2 });
+  const [confirm, setConfirm] = useState("");
+  const [ack, setAck] = useState(false);
   const set = (k) => (e) => setF({ ...f, [k]: k === "priority" ? Number(e.target.value) : e.target.value });
-  const ready = f.primary_url && f.join_token && f.advertise_url && f.priority;
+  const fromPrimary = sourceRole === "primary";
+  const deps = d?.guards?.to_standalone_dependents || [];
+  const overridePinned = fromPrimary && !!d?.override;      // must clear pin first
+  const needOrphan = fromPrimary && deps.length > 0;         // orphan hard-confirm
+  const baseReady = f.primary_url && f.join_token && f.advertise_url && f.priority;
+  const ready = baseReady && !overridePinned && (needOrphan ? confirm === d?.node_id : (fromPrimary ? ack : true));
+  const submit = () => onGo({
+    primary_url: f.primary_url, join_token: f.join_token, advertise_url: f.advertise_url,
+    priority: f.priority, force: needOrphan, confirm_hostname: needOrphan ? confirm : "",
+  });
   return (
     <div className="flex flex-col gap-2.5 border-t border-white/10 pt-4">
-      <span className={cn(label, "font-medium")}>Join an existing cluster as a secondary</span>
+      <span className={cn(label, "font-medium")}>
+        {fromPrimary ? "Join an existing primary (become secondary)" : "Join an existing cluster as a secondary"}
+      </span>
+      {fromPrimary && (
+        <p className="text-[13px] text-amber-300 leading-relaxed max-w-prose">
+          This node will leave its own cluster and join {f.primary_url || "<primary>"} as a secondary. It will stop being a primary.
+        </p>
+      )}
       <p className="text-[13px] text-zinc-400 leading-relaxed max-w-prose">
-        Enrol with a running primary using a join token minted on that primary — the same enrol path the
-        installer uses. Your reachable address is verified in both directions before you're added.
+        Enrol with a running primary using a join token minted on that primary for{" "}
+        <span className="font-mono text-ink">{d?.node_id || "this node"}</span> — the same enrol path the installer
+        uses (bidirectional reachability + the shared fleet secret). Your reachable address is verified both ways.
       </p>
-      <div className="flex items-center gap-2.5 flex-wrap">
-        <input className={cn(input, "w-64")} placeholder="primary address (http://…:8081)" value={f.primary_url} onChange={set("primary_url")} />
-        <input className={cn(input, "w-56")} placeholder="join token" value={f.join_token} onChange={set("join_token")} />
-        <input className={cn(input, "w-64")} placeholder="this node's reachable address" value={f.advertise_url} onChange={set("advertise_url")} />
-        <input className={cn(input, "w-24")} type="number" min={1} max={99} value={f.priority} onChange={set("priority")} placeholder="priority" />
-        <button className={btnPrimary} disabled={busy || !ready} onClick={() => onGo(f)}>Validate token + join</button>
-      </div>
+      {overridePinned ? (
+        <span className="text-[13px] text-rose-300 leading-relaxed">
+          Blocked: override/pin is set on this node — clear it (Clear override, below) before joining another primary.
+        </span>
+      ) : (
+        <>
+          <div className="flex items-center gap-2.5 flex-wrap">
+            <input className={cn(input, "w-64")} placeholder="primary address (http://…:8081)" value={f.primary_url} onChange={set("primary_url")} />
+            <input className={cn(input, "w-56")} placeholder="join token" value={f.join_token} onChange={set("join_token")} />
+            <input className={cn(input, "w-64")} placeholder="this node's reachable address" value={f.advertise_url} onChange={set("advertise_url")} />
+            <input className={cn(input, "w-24")} type="number" min={1} max={99} value={f.priority} onChange={set("priority")} placeholder="priority" />
+          </div>
+          {needOrphan && (
+            <div className="flex items-center gap-2.5 flex-wrap">
+              <span className="text-[13px] text-amber-300 leading-relaxed">
+                Orphans {deps.length} secondary({deps.join(", ")}) that point at this node — type <span className="font-mono text-ink">{d?.node_id}</span> to confirm
+              </span>
+              <input className={cn(input, "w-44")} placeholder={d?.node_id} value={confirm} onChange={(e) => setConfirm(e.target.value)} />
+            </div>
+          )}
+          {fromPrimary && !needOrphan && (
+            <label className="flex items-center gap-2 text-[13px] text-zinc-300">
+              <input type="checkbox" checked={ack} onChange={(e) => setAck(e.target.checked)} />
+              I understand this node will stop being its own primary.
+            </label>
+          )}
+          <button className={cn(needOrphan ? btnDanger : btnPrimary, "self-start")} disabled={busy || !ready} onClick={submit}>
+            {fromPrimary ? "Leave my cluster + join as secondary" : "Validate token + join"}
+          </button>
+        </>
+      )}
     </div>
   );
 }
