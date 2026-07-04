@@ -119,3 +119,8 @@ federation:
   # (3 missed rounds) is treated as down. A single missed round never fails over.
   health_interval_seconds: 10
   unreachable_after_seconds: 30
+  # Automatic failover is OFF for now: a lost primary does NOT trigger an auto-promotion.
+  # Gossip still runs (roster stays fresh, followers follow, a partitioned primary still
+  # steps down) but taking over primary is a MANUAL action in Admin · Cluster. Toggle live
+  # from the Admin tab or flip here. The split-brain / majority guard is unaffected.
+  auto_failover: false
