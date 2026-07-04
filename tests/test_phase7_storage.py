@@ -82,6 +82,37 @@ def test_mount_produces_one_row_with_bytes(tmp_path):
     assert m["owner_project"] == "System"
 
 
+def test_mount_attributed_to_app_by_container_bind(tmp_path):
+    # a container of app 'openwebui' stores data on /mnt/owui_data → that whole mount is theirs
+    rows = build_storage_registry(
+        [_mount("/mnt/owui_data", used=236_000_000_000, project="System"),
+         _container("owui", project="openwebui", bind_sources=["/mnt/owui_data/uploads"])],
+        server_id="oci", projects_root=str(tmp_path), valid_projects=VALID,
+    )
+    m = next(r for r in rows if r["kind"] == "mount")
+    assert m["owner_project"] == "openwebui"          # not System
+    assert m["used_bytes"] == 236_000_000_000         # byte total unchanged
+
+
+def test_mount_attributed_to_app_by_name_in_path(tmp_path):
+    # a dedicated data/backup drive no container mounts still maps by app-name token
+    rows = build_storage_registry(
+        [_mount("/mnt/openwebui_data", project="System"),
+         _mount("/mnt/backup_openwebui", project="System")],
+        server_id="oci", projects_root=str(tmp_path), valid_projects=VALID,
+    )
+    for r in [x for x in rows if x["kind"] == "mount"]:
+        assert r["owner_project"] == "openwebui", r["name"]
+
+
+def test_unrelated_mount_stays_system(tmp_path):
+    rows = build_storage_registry(
+        [_mount("/", project="System"), _mount("/boot/efi", project="System")],
+        server_id="oci", projects_root=str(tmp_path), valid_projects=VALID,
+    )
+    assert all(r["owner_project"] == "System" for r in rows if r["kind"] == "mount")
+
+
 def test_docker_volume_attributed_to_compose_project(tmp_path):
     rows = build_storage_registry(
         [_volume("openwebui_data", project="openwebui", size=1_000_000)],
