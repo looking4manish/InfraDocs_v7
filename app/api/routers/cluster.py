@@ -166,6 +166,7 @@ def state(_: str = Depends(verify_auth), cfg: Config = Depends(get_config), db: 
         "is_primary": bool(s.get("is_primary")),
         "override": override,
         "cluster_enabled": MGR.is_enabled(cfg, db),
+        "auto_failover": MGR.auto_failover_enabled(cfg, db),
         "current_leader": leader,
         "majority": CC.has_majority(len(reachable), len(nodes)),
         "fleet_size": CC.fleet_size([n["node_id"] for n in roster], tomb),
@@ -279,6 +280,23 @@ async def set_enabled(req: EnableRequest, request: Request, actor: str = Depends
     _audit(db, actor, "cluster_enable" if req.value else "cluster_disable",
            _role(db), _role(db), cfg.server.id, "ok", f"cluster_enabled={req.value}")
     return {"ok": True, "cluster_enabled": bool(req.value)}
+
+
+class AutoFailoverRequest(BaseModel):
+    value: bool
+
+
+@router.post("/auto-failover")
+def set_auto_failover(req: AutoFailoverRequest, actor: str = Depends(verify_auth),
+                      cfg: Config = Depends(get_config), db: DBManager = Depends(get_db)):
+    """Toggle AUTOMATIC failover. Persists a runtime override the live gossip loop re-reads
+    every round (no restart). When OFF, a lost primary does NOT auto-promote a survivor —
+    gossip still runs and the split-brain guard is unaffected, but taking over is a manual
+    action (Promote / Make primary). When ON, the majority-partition survivor auto-elects."""
+    _set_self(db, {"auto_failover": bool(req.value)})
+    _audit(db, actor, "auto_failover_enable" if req.value else "auto_failover_disable",
+           _role(db), _role(db), cfg.server.id, "ok", f"auto_failover={req.value}")
+    return {"ok": True, "auto_failover": bool(req.value)}
 
 
 class ToPrimaryRequest(BaseModel):

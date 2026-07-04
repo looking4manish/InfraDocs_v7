@@ -92,6 +92,7 @@ export default function AdminCluster() {
 
   const d = state.data;
   const enable = run((v) => endpoints.clusterEnable(v).then((r) => r.data), (r) => `cluster ${r.cluster_enabled ? "enabled" : "disabled"}`);
+  const autoFailover = run((v) => endpoints.clusterAutoFailover(v).then((r) => r.data), (r) => `automatic failover ${r.auto_failover ? "enabled" : "disabled"}`);
   const toPrimary = run((p) => endpoints.clusterToPrimary(p).then((r) => r.data), "now serving as primary");
   const join = run((b) => endpoints.clusterJoin(b).then((r) => r.data), "joined the cluster as secondary");
   const promote = run((f) => endpoints.clusterPromote(f).then((r) => r.data), (r) => (r.promoted ? "promoted to primary" : r.reason));
@@ -115,6 +116,7 @@ export default function AdminCluster() {
         <h1 className="text-2xl font-bold text-ink tracking-tight">Admin · Cluster</h1>
         <Pill tone={role === "primary" ? "green" : role === "secondary" ? "cyan" : "amber"}>role: {role}</Pill>
         <Pill tone={d.cluster_enabled ? "green" : "zinc"}>cluster {d.cluster_enabled ? "enabled" : "paused"}</Pill>
+        <Pill tone={d.auto_failover ? "green" : "amber"}>auto-failover {d.auto_failover ? "on" : "off (manual)"}</Pill>
         {d.override && <Pill tone="amber">failover frozen (override)</Pill>}
         {!d.majority && <Pill tone="rose">no majority</Pill>}
         <span className="ml-auto text-[13px] text-zinc-300 font-mono">
@@ -147,6 +149,15 @@ export default function AdminCluster() {
                 disabled={enable.isPending}
                 onClick={() => enable.mutate(!d.cluster_enabled)}>
                 {d.cluster_enabled ? "Pause failover (quiesce gossip)" : "Enable cluster (start gossip + failover)"}
+              </button>
+            </Control>
+            <Control help={d.auto_failover
+              ? "Automatic failover is ON: if the primary is lost, the highest-priority survivor in the majority partition auto-promotes itself."
+              : "Automatic failover is OFF: gossip still runs (roster stays fresh, followers follow, a partitioned primary still steps down) but NO node auto-takes primary — promote one manually below when a primary is lost."}>
+              <button className={d.auto_failover ? btn : btnPrimary}
+                disabled={autoFailover.isPending}
+                onClick={() => autoFailover.mutate(!d.auto_failover)}>
+                {d.auto_failover ? "Disable automatic failover (manual takeover only)" : "Enable automatic failover"}
               </button>
             </Control>
           </Section>

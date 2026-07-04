@@ -107,6 +107,7 @@ export const endpoints = {
     api.post("/api/cluster/override", { value }),
   // Admin / Cluster tab — role-transition matrix, enable toggle, evict, tokens, audit.
   clusterEnable: (value) => api.post("/api/cluster/enable", { value }),
+  clusterAutoFailover: (value) => api.post("/api/cluster/auto-failover", { value }),
   clusterToPrimary: (priority) => api.post("/api/cluster/to-primary", { priority }),
   clusterJoin: (body) => api.post("/api/cluster/join", body),
   clusterDemote: () => api.post("/api/cluster/demote"),

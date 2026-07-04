@@ -110,6 +110,12 @@ class FederationConfig(BaseModel):
     # election. Loose enough that a single missed round never causes a failover.
     health_interval_seconds: int = 10
     unreachable_after_seconds: int = 30  # 3 missed rounds
+    # AUTOMATIC FAILOVER — when a primary is lost, may a surviving node in the majority
+    # partition auto-promote itself? OFF for the moment: elections still run (roster stays
+    # fresh, followers follow, a partitioned primary still steps down = split-brain guard
+    # intact), but NO node auto-takes-primary. Taking over is a MANUAL operator action
+    # (Admin · Cluster → Promote / Make primary). Hot-toggleable at runtime.
+    auto_failover: bool = True
 
 
 class Config(BaseModel):
