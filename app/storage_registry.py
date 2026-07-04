@@ -18,6 +18,7 @@ the using container's app.
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Set
 
@@ -85,6 +86,39 @@ def _container_app_name(
     return "System"
 
 
+def _mount_owner(
+    target: str, bind_to_app: Dict[str, str], valid_projects: Set[str]
+) -> str:
+    """Best app owner for a whole-disk mount (e.g. /mnt/immich_data) that the path-under-
+    projects_root rule leaves as System. Two signals, strongest first:
+      1) a CONTAINER of some app bind-mounts a path at or under this mount → that app owns it
+         (e.g. the immich container mounts /mnt/immich_data);
+      2) the mount path contains an app name as a token (immich_data, backup_immich →
+         'immich'; backup_nextcloud → 'nextcloud') — this is what catches dedicated data /
+         backup drives that no container mounts. Longest name wins to avoid partials.
+    Falls back to System. Never changes the byte total — only who the bytes are attributed to."""
+    tnorm = os.path.normpath(target or "")
+    if not tnorm or tnorm == "/":
+        return "System"
+    # (1) container bind under this mount
+    for src, app in bind_to_app.items():
+        if app not in valid_projects or app == "System":
+            continue
+        s = os.path.normpath(src)
+        if s == tnorm or s.startswith(tnorm.rstrip("/") + "/"):
+            return app
+    # (2) app-name token in the mount path
+    low = target.lower()
+    best: Optional[str] = None
+    for p in valid_projects:
+        if p == "System" or len(p) < 3:
+            continue
+        if re.search(r"(?:^|[^a-z0-9])" + re.escape(p.lower()) + r"(?:[^a-z0-9]|$)", low):
+            if best is None or len(p) > len(best):
+                best = p
+    return best or "System"
+
+
 def _path_owner(path: str, valid_projects: Set[str], projects_root: str) -> str:
     """Return the owning project if `path` is under projects_root/<X>, else System."""
     if not path:
@@ -126,6 +160,19 @@ def build_storage_registry(
         by_id[row["storage_id"]] = row
         rows.append(row)
 
+    # Map every container bind-source -> its app, so a whole-disk mount can be attributed to
+    # the app that actually stores data on it (e.g. /mnt/immich_data -> immich).
+    bind_to_app: Dict[str, str] = {}
+    for c in assets:
+        if c.get("category") != "docker_container":
+            continue
+        app_name = _container_app_name(c, valid)
+        if app_name == "System":
+            continue
+        for src in c["metadata"].get("bind_mount_sources") or []:
+            if src:
+                bind_to_app.setdefault(os.path.normpath(src), app_name)
+
     # ---- mounts -----------------------------------------------------------
     for m in assets:
         if m.get("category") != "storage_mount":
@@ -135,6 +182,10 @@ def build_storage_registry(
         owner = m.get("project") or "System"
         if owner not in valid:
             owner = "System"
+        # A whole-disk mount left as System by the path-under-projects_root rule: try to
+        # attribute it to the app that stores data there (container bind, or name-in-path).
+        if owner == "System":
+            owner = _mount_owner(target, bind_to_app, valid)
         row = _new_row(
             kind="mount",
             storage_id=f"{server_id}:storage:mount:{target}",
