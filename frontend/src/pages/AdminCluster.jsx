@@ -97,6 +97,7 @@ export default function AdminCluster() {
   const join = run((b) => endpoints.clusterJoin(b).then((r) => r.data), "joined the cluster as secondary");
   const promote = run((f) => endpoints.clusterPromote(f).then((r) => r.data), (r) => (r.promoted ? "promoted to primary" : r.reason));
   const demote = run(() => endpoints.clusterDemote().then((r) => r.data), "demoted to secondary");
+  const handoff = run((t) => endpoints.clusterHandoff(t).then((r) => r.data), (r) => `primary handed to ${r.leader} — this console follows within ~20s`);
   const toStandalone = run((b) => endpoints.clusterToStandalone(b.force, b.confirm).then((r) => r.data), "converted to standalone");
   const setPriority = run((p) => endpoints.clusterSetPriority(p).then((r) => r.data), (r) => `priority set to ${r.priority}`);
   const evict = run((b) => endpoints.clusterEvict(b.node_id, b.confirm).then((r) => r.data), (r) => `evicted ${r.evicted} (fleet now ${r.fleet_size})`);
@@ -215,7 +216,7 @@ export default function AdminCluster() {
               <span className={cn(colHead, "w-14")}>priority</span>
               <span className={cn(colHead, "flex-1")}>node</span>
               <span className={cn(colHead, "w-24")}>reachable?</span>
-              <span className={cn(colHead, "w-16 text-right")}>action</span>
+              <span className={cn(colHead, "w-44 text-right")}>action</span>
             </div>
             <div className="flex flex-col">
               {[...(d.nodes || [])].sort((a, b) => (a.priority ?? 99) - (b.priority ?? 99)).map((n) => (
@@ -230,7 +231,9 @@ export default function AdminCluster() {
                   <span className={cn("w-24 text-[13px] font-medium", n.reachable ? "text-emerald-300" : "text-rose-300")}>
                     {n.reachable ? "reachable" : "unreachable"}
                   </span>
-                  <span className="w-16 flex justify-end">
+                  <span className="w-44 flex justify-end items-center gap-1.5">
+                    {role === "primary" && !n.self && !n.is_primary && n.reachable &&
+                      <MakePrimaryControl nodeId={n.node_id} onGo={(t) => handoff.mutate(t)} busy={handoff.isPending} />}
                     {!n.self && <EvictControl nodeId={n.node_id} onGo={(b) => evict.mutate(b)} busy={evict.isPending} />}
                   </span>
                 </div>
@@ -433,6 +436,18 @@ function EvictControl({ nodeId, onGo, busy }) {
       <button className={cn(btnDanger, "py-1 px-2.5")} disabled={busy || confirm !== nodeId}
         onClick={() => onGo({ node_id: nodeId, confirm })}>Confirm</button>
       <button className={cn(btn, "py-1 px-2.5")} onClick={() => { setOpen(false); setConfirm(""); }}>×</button>
+    </span>
+  );
+}
+
+function MakePrimaryControl({ nodeId, onGo, busy }) {
+  const [arm, setArm] = useState(false);
+  if (!arm) return <button className={cn(btnPrimary, "py-1 px-2.5")} onClick={() => setArm(true)}>Make primary</button>;
+  return (
+    <span className="flex items-center gap-1.5">
+      <button className={cn(btnPrimary, "py-1 px-2.5")} disabled={busy}
+        onClick={() => { onGo(nodeId); setArm(false); }} title={`Hand the primary role to ${nodeId}`}>Confirm</button>
+      <button className={cn(btn, "py-1 px-2.5")} onClick={() => setArm(false)}>×</button>
     </span>
   );
 }

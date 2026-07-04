@@ -419,6 +419,80 @@ def demote(actor: str = Depends(verify_auth), cfg: Config = Depends(get_config),
     return {"ok": True, "role": "secondary"}
 
 
+class HandoffRequest(BaseModel):
+    target: str
+
+
+@router.post("/handoff")
+def handoff(req: HandoffRequest, actor: str = Depends(verify_auth),
+            cfg: Config = Depends(get_config), db: DBManager = Depends(get_db)):
+    """Planned PRIMARY switchover to a healthy peer — the thing promote/demote can't do
+    between two live nodes (each guard blocks the other). Runs on the CURRENT primary: step
+    down first, then instruct the target to assume primary over the shared-fleet-secret
+    channel. If the target can't be reached, roll back (reclaim primary) so the cluster is
+    never left leaderless. Auto-failover being off means the brief single-leader gap can't
+    kick off an election. This is what the Admin fleet console's per-node 'Make primary' uses."""
+    node_id = cfg.server.id
+    now = datetime.now(timezone.utc)
+    s = _self(db)
+    if not s.get("is_primary"):
+        raise HTTPException(status_code=409, detail="only the current primary can hand off the role")
+    if req.target == node_id:
+        return {"ok": True, "leader": node_id, "note": "already primary"}
+    tomb = _tombstones(db)
+    target = next((n for n in _roster(db) if n["node_id"] == req.target and n["node_id"] not in tomb), None)
+    if not target:
+        raise HTTPException(status_code=404, detail=f"'{req.target}' is not a known node")
+    addr = target.get("address")
+    reachable = bool(addr) and CC._age(now, target.get("last_seen")) <= cfg.federation.unreachable_after_seconds
+    if not reachable:
+        raise HTTPException(status_code=409, detail=f"target '{req.target}' is not reachable — cannot hand off")
+    # 1) step down FIRST — a momentary no-leader is safer than two primaries, and with
+    #    auto-failover off no node will opportunistically self-promote in the gap.
+    _set_self(db, {"is_primary": False})
+    _set_role(db, "secondary")
+    db.db.settings.update_one({"_id": "app"}, {"$set": {"primary_node": req.target}}, upsert=True)
+    # 2) tell the target to assume primary, authenticated with the shared fleet secret.
+    from app.fleet_auth import get_or_create_fleet_secret
+    from app import federation as F
+    try:
+        secret = get_or_create_fleet_secret(db)
+        F._post_json(addr.rstrip("/") + "/api/cluster/assume-primary", {"from": node_id},
+                     headers={"X-Fleet-Auth": secret}, timeout=15)
+    except Exception as e:  # noqa: BLE001 — roll back so the cluster is never left leaderless
+        _set_self(db, {"is_primary": True})
+        _set_role(db, "primary")
+        db.db.settings.update_one({"_id": "app"}, {"$set": {"primary_node": node_id}}, upsert=True)
+        _audit(db, actor, "handoff", "primary", "primary", node_id, "failed",
+               f"target {req.target} did not assume ({type(e).__name__}); rolled back — kept primary")
+        raise HTTPException(status_code=502,
+                            detail=f"handoff to '{req.target}' failed ({type(e).__name__}) — kept primary")
+    # 3) reflect the new leader locally; gossip confirms it fleet-wide within a round.
+    db.db.cluster_nodes.update_many({}, {"$set": {"is_primary": False}})
+    db.db.cluster_nodes.update_one({"node_id": req.target}, {"$set": {"is_primary": True}})
+    _audit(db, actor, "handoff", "primary", "secondary", node_id, "ok", f"handed primary to {req.target}")
+    return {"ok": True, "leader": req.target, "role": "secondary"}
+
+
+@router.post("/assume-primary")
+def assume_primary(actor: str = Depends(verify_auth), cfg: Config = Depends(get_config),
+                   db: DBManager = Depends(get_db)):
+    """Internal handoff target: called by the outgoing primary over the fleet-authed channel to
+    take leadership. Fleet-principal ONLY (never a browser session) so it can't be used to mint
+    a second primary out of band — a direct promotion has its own guarded /promote path."""
+    if actor != "fleet":
+        raise HTTPException(status_code=403,
+                            detail="assume-primary is an internal handoff endpoint (fleet-authenticated only)")
+    node_id = cfg.server.id
+    now = datetime.now(timezone.utc)
+    _set_self(db, {"is_primary": True, "node_id": node_id, "promoted_at": now, "promoted_by": "handoff"})
+    db.db.cluster_nodes.update_many({}, {"$set": {"is_primary": False}})
+    db.db.settings.update_one({"_id": "app"}, {"$set": {"primary_node": node_id}}, upsert=True)
+    _set_role(db, "primary")
+    _audit(db, "handoff", "assume_primary", "secondary", "primary", node_id, "ok", "assumed primary via handoff")
+    return {"ok": True, "role": "primary", "leader": node_id}
+
+
 class ToStandaloneRequest(BaseModel):
     force: bool = False
     confirm_hostname: Optional[str] = None

@@ -111,6 +111,7 @@ export const endpoints = {
   clusterToPrimary: (priority) => api.post("/api/cluster/to-primary", { priority }),
   clusterJoin: (body) => api.post("/api/cluster/join", body),
   clusterDemote: () => api.post("/api/cluster/demote"),
+  clusterHandoff: (target) => api.post("/api/cluster/handoff", { target }),
   clusterToStandalone: (force, confirm_hostname) =>
     api.post("/api/cluster/to-standalone", { force, confirm_hostname }),
   clusterSetPriority: (priority) => api.post("/api/cluster/priority", { priority }),
