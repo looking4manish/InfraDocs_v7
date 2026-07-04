@@ -217,7 +217,24 @@ def execute_plan(
 
     ts = (now or datetime.now(timezone.utc)).strftime("%Y%m%d_%H%M%S")
     backup_dir = f"{projects_root}/backups/{name}/{ts}"
-    os.makedirs(backup_dir, exist_ok=True)
+    try:
+        os.makedirs(backup_dir, exist_ok=True)
+    except OSError as e:
+        # FAIL LOUD with a named reason instead of a bare 500 that vanishes — and record it to
+        # the actions log so it shows in the live teardown window. The usual cause: the projects
+        # volume is mounted read-only in the API container (teardown needs it read-write to back
+        # up + delete). Nothing has been touched yet, so this is a clean, safe abort.
+        reason = (f"cannot create backup directory {backup_dir}: {e} — the projects volume is "
+                  f"read-only in the API container (teardown needs it mounted read-write). "
+                  f"Nothing was deleted.")
+        prep = {"op": "prepare_backup", "target": backup_dir, "critical": True}
+        _audit(db, actor, name, prep, {"status": "failed", "rc": None, "stdout": "", "stderr": reason})
+        return {"project": name, "backup_dir": backup_dir, "aborted": True,
+                "results": [{**prep, "status": "failed", "stderr": reason,
+                             "detail": "could not prepare backup — teardown aborted, nothing deleted"}],
+                "summary": {"ok": False, "removed_stopped": [], "backed_up": [],
+                            "skipped_shared": plan.get("skipped", []),
+                            "failed": [{"op": "prepare_backup", "target": backup_dir, "reason": reason}]}}
 
     results: List[Dict[str, Any]] = []
     aborted = False

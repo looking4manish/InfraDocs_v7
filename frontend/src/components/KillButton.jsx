@@ -23,7 +23,10 @@ export default function KillButton({ name }) {
     mutationFn: () => endpoints.teardown(name, { dry_run: false, confirm: name }).then((r) => r.data),
     onMutate: () => { setStartedAt(Date.now()); setResult(null); },
     onSuccess: setResult,
-    onError: () => setResult({ error: true }),
+    onError: (e) => setResult({
+      error: true,
+      detail: e?.response?.data?.detail || e?.message || "request failed",
+    }),
   });
 
   // Live log: poll the audit log for this teardown's steps while it runs.
@@ -193,9 +196,9 @@ function KillLogModal({ name, rows, killing, result, onClose }) {
           {killing ? (
             <span className="text-zinc-500">Do not close — teardown in progress.</span>
           ) : result?.error ? (
-            <span className="text-red-300 flex items-center gap-1.5"><AlertTriangle size={13} /> Request failed — see the actions log.</span>
+            <span className="text-red-300 flex items-start gap-1.5"><AlertTriangle size={13} className="mt-0.5 shrink-0" /> <span>{result.detail || "Request failed — see the actions log."}</span></span>
           ) : result?.aborted ? (
-            <span className="text-amber-300 flex items-center gap-1.5"><AlertTriangle size={13} /> Aborted after a backup failure — nothing was deleted.</span>
+            <span className="text-amber-300 flex items-start gap-1.5"><AlertTriangle size={13} className="mt-0.5 shrink-0" /> <span>Aborted — nothing was deleted.{result.summary?.failed?.length ? " " + result.summary.failed.map((f) => f.reason).join("; ") : ""}</span></span>
           ) : result ? (
             <span className="text-emerald-300 flex items-center gap-1.5">
               <Check size={13} /> Done · backup at <code className="text-zinc-400">{result.backup_dir}</code>

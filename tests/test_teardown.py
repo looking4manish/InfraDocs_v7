@@ -82,6 +82,27 @@ def test_execute_aborts_when_backup_fails(tmp_path):
     assert statuses.get("remove_dir") == "skipped"
 
 
+def test_execute_fails_loud_when_backup_dir_is_readonly(tmp_path):
+    # The projects volume mounted read-only in the API container = os.makedirs raises OSError.
+    # Teardown must NOT crash with an invisible 500 — it returns a structured aborted result
+    # with a NAMED reason and records it to the actions log, and deletes nothing.
+    proj = tmp_path / "web"; proj.mkdir()
+    web = _app("web", containers=["web-app"], project_dir=str(proj))
+    plan = build_plan(web, [web], projects_root=str(tmp_path))
+    db = MagicMock()
+
+    with patch.object(teardown.os, "makedirs",
+                      side_effect=OSError(30, "Read-only file system")), \
+         patch.object(teardown, "_run") as run:
+        res = execute_plan(plan, db, "msinha", projects_root=str(tmp_path))
+
+    assert res["aborted"] is True
+    assert res["summary"]["ok"] is False
+    assert res["summary"]["failed"] and "read-only" in res["summary"]["failed"][0]["reason"].lower()
+    run.assert_not_called()                       # nothing destructive ran
+    assert db.record_action.called               # the failure IS surfaced to the actions log
+
+
 def test_execute_runs_all_when_backups_ok(tmp_path):
     proj = tmp_path / "web"; proj.mkdir()
     web = _app("web", containers=["web-app"], project_dir=str(proj))
