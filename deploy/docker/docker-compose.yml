@@ -40,7 +40,10 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock   # docker scan + actions
       - /etc/nginx:/etc/nginx:ro
       - /etc/letsencrypt:/etc/letsencrypt:ro
-      - "${PROJECTS_ROOT:-/home/msinha/projects}:${PROJECTS_ROOT:-/home/msinha/projects}:ro"
+      # read-WRITE: the scanner only reads, but teardown ('Kill Button') must back up +
+      # delete project dirs and write backups to <projects_root>/backups. Read-only here made
+      # teardown 500 on os.makedirs (read-only filesystem) with nothing surfaced to the UI.
+      - "${PROJECTS_ROOT:-/home/msinha/projects}:${PROJECTS_ROOT:-/home/msinha/projects}:rw"
       - /etc/cron.d:/etc/cron.d:ro
       - /etc/crontab:/etc/crontab:ro
       - /etc/cron.daily:/etc/cron.daily:ro

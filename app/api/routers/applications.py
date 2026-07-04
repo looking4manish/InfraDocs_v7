@@ -1,5 +1,7 @@
 """Applications endpoints — the application-centric view."""
 
+import logging
+
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
@@ -10,6 +12,7 @@ from app.core.db_manager import DBManager
 from app.teardown import TeardownRefused, build_plan, execute_plan
 
 router = APIRouter()
+_log = logging.getLogger("app.teardown")
 
 
 class TeardownRequest(BaseModel):
@@ -78,6 +81,10 @@ def application_teardown(
         result = execute_plan(plan, db, actor, projects_root=cfg.paths.projects_root)
     except TeardownRefused as e:
         raise HTTPException(status_code=409, detail=str(e))
+    except Exception as e:  # never let teardown die with an invisible 500 traceback
+        _log.exception("teardown of %s crashed", name)
+        raise HTTPException(status_code=500,
+                            detail=f"teardown of '{name}' failed: {type(e).__name__}: {e}")
     return {"dry_run": False, **result}
 
 
