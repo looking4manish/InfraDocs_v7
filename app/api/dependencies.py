@@ -79,3 +79,21 @@ def verify_auth(
         detail="authentication required",
         headers={"WWW-Authenticate": "Basic"},
     )
+
+
+# Well-known non-user principals returned by verify_auth().
+FLEET_PRINCIPAL = "fleet"        # the leader→peer proxy relay credential (X-Fleet-Auth)
+ANON_PRINCIPAL = "anonymous"     # only when INFRADOCS_AUTH_DISABLED=1 (local dev)
+
+
+def require_real_user(actor: str = Depends(verify_auth)) -> str:
+    """Reject the relayed 'fleet' service principal on user/credential-management
+    endpoints (join-token mint/revoke, account changes). A peer relay carries the
+    fleet secret only to forward an already-authorized operator request — it must
+    never be able to mint new fleet trust anchors or alter accounts on the peer."""
+    if actor == FLEET_PRINCIPAL:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="not permitted for the fleet service principal",
+        )
+    return actor

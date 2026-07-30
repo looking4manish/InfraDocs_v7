@@ -253,12 +253,12 @@ export default function AdminCluster() {
             <div className="flex flex-col">
               {(tokens.data?.tokens || []).length === 0 && <div className="text-[13px] text-zinc-400 py-2">No outstanding tokens.</div>}
               {(tokens.data?.tokens || []).map((t) => (
-                <div key={t.token} className="flex items-center gap-3 py-2 border-b border-white/5">
+                <div key={t.jti} className="flex items-center gap-3 py-2 border-b border-white/5">
                   <span className="font-mono text-sm text-ink w-40 truncate">{t.server_id}</span>
                   <span className="font-mono text-[13px] text-zinc-300 flex-1 truncate">{t.token_preview}</span>
                   <span className="w-20 flex justify-end">
                     <button className={cn(btnDanger, "py-1 px-2.5")} disabled={revoke.isPending}
-                      onClick={() => revoke.mutate(t.token)}>Revoke</button>
+                      onClick={() => revoke.mutate(t.jti)}>Revoke</button>
                   </span>
                 </div>
               ))}

@@ -19,7 +19,7 @@ from pydantic import BaseModel
 from app import cluster as CC
 from app import federation as F
 from app.cli_install import normalize_url
-from app.api.dependencies import get_config, get_db, verify_auth
+from app.api.dependencies import get_config, get_db, require_real_user, verify_auth
 from app.core.config_loader import Config
 from app.core.db_manager import DBManager
 
@@ -31,28 +31,36 @@ class MintRequest(BaseModel):
 
 
 @router.post("/tokens")
-def mint_token(req: MintRequest, actor: str = Depends(verify_auth), db: DBManager = Depends(get_db)):
-    """Primary mints a join token for a new secondary (shown in 'Add a server')."""
+def mint_token(req: MintRequest, actor: str = Depends(require_real_user), db: DBManager = Depends(get_db)):
+    """Primary mints a join token for a new secondary (shown in 'Add a server').
+
+    The full token secret is returned ONCE here (to hand to the new node). It is never
+    returned again by the list endpoint — a leaked list must not be a path to the fleet
+    secret. Each token carries a non-secret `jti` used for listing + revocation."""
     token = secrets.token_urlsafe(24)
+    jti = secrets.token_urlsafe(6)
     db.db.join_tokens.insert_one({
         "token": token,
+        "jti": jti,
         "server_id": req.server_id,
         "created_at": datetime.now(timezone.utc),
         "created_by": actor,
     })
-    return {"token": token, "server_id": req.server_id}
+    return {"token": token, "jti": jti, "server_id": req.server_id}
 
 
 @router.get("/tokens")
 def list_tokens(_: str = Depends(verify_auth), db: DBManager = Depends(get_db)):
-    """List outstanding join tokens (for the Admin tab lifecycle UI). The token is shown
-    truncated — enough to identify + revoke, not to leak the full secret in a list view."""
+    """List outstanding join tokens for the Admin lifecycle UI. The full secret is NEVER
+    returned — only a non-secret `jti` (used to revoke) and a short preview to identify it.
+    The join token doubles as a secondary's durable ingest credential + the anchor to pull
+    the fleet secret, so leaking it in a list view is a path to fleet compromise."""
     out = []
     for t in db.db.join_tokens.find({}, {"_id": 0}).sort("created_at", -1):
         tok = t.get("token", "")
         out.append({
-            "token": tok,
-            "token_preview": (tok[:6] + "…" + tok[-4:]) if len(tok) > 12 else tok,
+            "jti": t.get("jti") or ((tok[:6] + tok[-4:]) if len(tok) > 12 else tok),
+            "token_preview": (tok[:6] + "…" + tok[-4:]) if len(tok) > 12 else "•••",
             "server_id": t.get("server_id"),
             "created_at": t.get("created_at"),
             "created_by": t.get("created_by"),
@@ -60,11 +68,13 @@ def list_tokens(_: str = Depends(verify_auth), db: DBManager = Depends(get_db)):
     return {"tokens": out, "count": len(out)}
 
 
-@router.delete("/tokens/{token}")
-def revoke_token(token: str, _: str = Depends(verify_auth), db: DBManager = Depends(get_db)):
+@router.delete("/tokens/{ident}")
+def revoke_token(ident: str, _: str = Depends(require_real_user), db: DBManager = Depends(get_db)):
     """Revoke a join token so it can no longer enroll a secondary (same token store the
-    installer's enroll validates against — revoking here closes that path everywhere)."""
-    res = db.db.join_tokens.delete_one({"token": token})
+    installer's enroll validates against — revoking here closes that path everywhere).
+    `ident` is the non-secret `jti` from the list view; the full token is also accepted
+    for back-compat with an already-minted token held by the operator."""
+    res = db.db.join_tokens.delete_one({"$or": [{"jti": ident}, {"token": ident}]})
     return {"ok": res.deleted_count > 0, "revoked": res.deleted_count}
 
 
@@ -228,12 +238,26 @@ class FleetSecretRequest(BaseModel):
     server_id: str
 
 
+def _is_enrolled(db: DBManager, server_id: str) -> bool:
+    """A node counts as enrolled once it has passed the bidirectional-reachability
+    /enroll handshake (recorded in federation_servers + the cluster roster)."""
+    return bool(
+        db.db.federation_servers.find_one({"server_id": server_id})
+        or db.db.cluster_nodes.find_one({"node_id": server_id})
+    )
+
+
 @router.post("/fleet-secret")
 def fleet_secret_endpoint(req: FleetSecretRequest, x_join_token: Optional[str] = Header(None),
                           db: DBManager = Depends(get_db)):
-    """Deliver the shared fleet secret to an ENROLLED secondary that presents its durable
-    join token (same trust anchor as ingest). Convergence path for already-enrolled nodes —
-    no re-enroll. Returned only over this gated channel; never logged."""
+    """Deliver the shared fleet secret to an ALREADY-ENROLLED secondary that presents its
+    durable join token. Convergence path for enrolled nodes — no re-enroll. The fleet secret
+    is a full-power relay credential, so this is gated on BOTH a valid token AND a prior
+    successful enrollment: a bare token that never completed the reachability handshake
+    cannot short-cut to the fleet secret. Returned only over this channel; never logged."""
     if not _valid_token(db, req.server_id, x_join_token):
         raise HTTPException(status_code=401, detail="invalid or missing join token")
+    if not _is_enrolled(db, req.server_id):
+        raise HTTPException(status_code=403,
+                            detail="server is not enrolled — complete /enroll first")
     return {"fleet_secret": get_or_create_fleet_secret(db)}
