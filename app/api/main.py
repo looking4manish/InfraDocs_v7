@@ -1,6 +1,7 @@
 """InfraDocs V6 API entry point."""
 
 import asyncio  # noqa: E402
+import os  # noqa: E402
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -51,10 +52,26 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# CORS — Phase 4 frontend runs separately (dev) and via nginx proxy (prod).
+# CORS — in prod the frontend is served SAME-ORIGIN via the nginx proxy, so no
+# cross-origin grant is needed at all. The only cross-origin caller is the dev vite
+# server. `allow_origins=["*"]` WITH `allow_credentials=True` is both unsafe (any site
+# could drive the authed API from a victim's browser) and silently ignored by browsers
+# (the spec forbids that combination), so pin an explicit allow-list. Override with
+# INFRADOCS_CORS_ORIGINS (comma-separated) when a real remote origin is needed.
+def _cors_origins() -> list:
+    raw = os.environ.get("INFRADOCS_CORS_ORIGINS", "").strip()
+    if raw:
+        return [o.strip() for o in raw.split(",") if o.strip()]
+    # Default: local dev only (vite). Prod is same-origin, so this grant is unused there.
+    return [
+        "http://localhost:5173", "http://127.0.0.1:5173",
+        "http://localhost:3000", "http://127.0.0.1:3000",
+    ]
+
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_cors_origins(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

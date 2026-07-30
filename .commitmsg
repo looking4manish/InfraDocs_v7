@@ -1,0 +1,14 @@
+P1.6: lock CORS, throttle the Basic-auth path, gate auth-disable to loopback
+
+- main.py: replace allow_origins=["*"]+allow_credentials (unsafe and browser-
+  ignored) with an explicit allow-list. Prod is same-origin via nginx so the
+  grant is unused there; default covers local vite dev. Override with
+  INFRADOCS_CORS_ORIGINS (comma-separated).
+- dependencies.py: add an in-memory brute-force throttle to the HTTP Basic path
+  (10 fails / 5 min / username -> 429). The /login endpoint had a throttle but
+  Basic against any endpoint was an unthrottled credential-stuffing channel.
+- dependencies.py: INFRADOCS_AUTH_DISABLED is now honored only for a loopback
+  caller, so leaving the dev bypass on can't silently expose the API to remote
+  clients. Documented the same-host-nginx caveat.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>

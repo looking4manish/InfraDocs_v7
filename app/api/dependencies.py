@@ -2,6 +2,7 @@
 
 import os
 import secrets
+import time
 from functools import lru_cache
 from typing import Optional
 
@@ -17,10 +18,42 @@ from app.core.db_manager import DBManager
 _basic = HTTPBasic(auto_error=False)
 
 
-def _auth_disabled() -> bool:
-    return os.environ.get("INFRADOCS_AUTH_DISABLED", "").lower() in (
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
+
+
+def _auth_disabled(request: Optional[Request]) -> bool:
+    """The open-house dev bypass — honored ONLY for a loopback caller.
+
+    Leaving INFRADOCS_AUTH_DISABLED=1 set must never silently expose the API to the
+    network: a genuinely remote client still has to authenticate. A host-local dev
+    client (127.0.0.1/::1) can use it. NOTE: the API runs host-network behind a
+    same-host nginx, so a proxied request also presents a loopback peer — do not rely
+    on this as network isolation; it is a guard against the flag being honored for
+    direct remote connections, not a substitute for keeping the flag OFF in a real deploy."""
+    if os.environ.get("INFRADOCS_AUTH_DISABLED", "").lower() not in (
         "1", "true", "yes", "on",
-    )
+    ):
+        return False
+    host = request.client.host if (request and request.client) else None
+    return host in _LOOPBACK_HOSTS
+
+
+# In-memory throttle for the HTTP Basic credential path (the /login endpoint has its
+# own). Without it, Authorization: Basic against any endpoint is an unthrottled brute
+# force channel that bypasses the login throttle entirely.
+_BASIC_FAILS: dict = {}
+_BASIC_WINDOW = 300      # seconds
+_BASIC_MAX = 10          # failures per window per username before a 429
+
+
+def _basic_throttled(key: str, now: float) -> bool:
+    hits = [t for t in _BASIC_FAILS.get(key, []) if now - t < _BASIC_WINDOW]
+    _BASIC_FAILS[key] = hits
+    return len(hits) >= _BASIC_MAX
+
+
+def _basic_fail(key: str, now: float) -> None:
+    _BASIC_FAILS.setdefault(key, []).append(now)
 
 
 @lru_cache(maxsize=1)
@@ -63,8 +96,8 @@ def verify_auth(
     credentials: Optional[HTTPBasicCredentials] = Depends(_basic),
     db: DBManager = Depends(get_db),
 ) -> str:
-    # Open-house mode: set INFRADOCS_AUTH_DISABLED=1 in .env to bypass auth.
-    if _auth_disabled():
+    # Open-house mode: set INFRADOCS_AUTH_DISABLED=1 in .env to bypass auth (loopback only).
+    if _auth_disabled(request):
         return credentials.username if credentials else "anonymous"
 
     # Fleet service credential: the shared secret the leader's node-switcher proxy presents
@@ -86,8 +119,17 @@ def verify_auth(
 
     # 2) HTTP Basic — web users (bcrypt) OR the bootstrap config credential.
     if credentials is not None:
+        now = time.time()
+        key = credentials.username or "?"
+        # Brute-force guard on the Basic path (the /login endpoint has its own throttle).
+        if _basic_throttled(key, now):
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="too many failed attempts — wait a few minutes",
+            )
         user = A.get_user(db, credentials.username)
         if user and A.verify_password(credentials.password, user.get("password_hash", "")):
+            _BASIC_FAILS.pop(key, None)
             _enforce_password_change(db, credentials.username, request)
             return credentials.username
         # Bootstrap / service-account path: the config username+password. Lets
@@ -98,7 +140,9 @@ def verify_auth(
         if expected and credentials.username == cfg.auth.username and secrets.compare_digest(
             credentials.password, expected
         ):
+            _BASIC_FAILS.pop(key, None)
             return credentials.username
+        _basic_fail(key, now)
 
     raise HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
