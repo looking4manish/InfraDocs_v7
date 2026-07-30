@@ -107,9 +107,10 @@ logging:
 
 auth:
   username: msinha
-  # password is read from env INFRADOCS_API_PASSWORD; falls back to dev default
+  # Password is read from env INFRADOCS_API_PASSWORD (per-host, in .env). There is NO
+  # committed fallback secret: if the env var is unset the config-credential Basic path
+  # is simply disabled — web users still log in via bcrypt DB accounts.
   password_env: INFRADOCS_API_PASSWORD
-  dev_password: msinha123
 
 federation:
   # Priority-ranked gossip cluster with automatic failover (no shared DB).

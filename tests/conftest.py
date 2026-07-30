@@ -22,6 +22,11 @@ load_dotenv(ROOT / ".env", override=False)
 # .env value — override=False only writes vars that are absent.
 os.environ["INFRADOCS_AUTH_DISABLED"] = "0"
 
+# Production ships NO committed config-credential fallback (auth.dev_password is None).
+# The API tests exercise the config-credential Basic path, so provide an explicit
+# password here via env — never a value baked into the repo.
+os.environ.setdefault("INFRADOCS_API_PASSWORD", "test-api-password")
+
 
 @pytest.fixture(scope="session")
 def auth():

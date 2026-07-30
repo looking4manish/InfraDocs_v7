@@ -5,7 +5,7 @@ import secrets
 from functools import lru_cache
 from typing import Optional
 
-from fastapi import Depends, Header, HTTPException, status
+from fastapi import Depends, Header, HTTPException, Request, status
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 
 from app.core.config_loader import Config, load_config
@@ -34,7 +34,30 @@ def get_db() -> DBManager:
     return DBManager(uri=cfg.mongodb.uri, database=cfg.mongodb.database)
 
 
+# Paths a user with must_change_password may still reach, so they can rotate it
+# (and load/unload the session) without being locked out of the whole API.
+_PW_CHANGE_EXEMPT = frozenset({
+    "/api/auth/change-password", "/api/auth/logout", "/api/auth/me", "/api/auth/login",
+})
+
+
+def _enforce_password_change(db: DBManager, username: str, request: Optional[Request]) -> None:
+    """Block a must_change_password user from every endpoint except the exempt auth paths.
+    Server-side enforcement (not just the frontend redirect) so the default seeded
+    credential can't be used against the API directly until it is rotated."""
+    if request is not None and request.url.path in _PW_CHANGE_EXEMPT:
+        return
+    from app import auth as A  # lazy — avoids import cycle
+    u = A.get_user(db, username)
+    if u and u.get("must_change_password"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="password change required — rotate the default password first",
+        )
+
+
 def verify_auth(
+    request: Request,
     authorization: Optional[str] = Header(None),
     x_fleet_auth: Optional[str] = Header(None),
     credentials: Optional[HTTPBasicCredentials] = Depends(_basic),
@@ -58,18 +81,21 @@ def verify_auth(
     if authorization and authorization.lower().startswith("bearer "):
         username = A.validate_session(db, authorization[7:].strip())
         if username:
+            _enforce_password_change(db, username, request)
             return username
 
     # 2) HTTP Basic — web users (bcrypt) OR the bootstrap config credential.
     if credentials is not None:
         user = A.get_user(db, credentials.username)
         if user and A.verify_password(credentials.password, user.get("password_hash", "")):
+            _enforce_password_change(db, credentials.username, request)
             return credentials.username
         # Bootstrap / service-account path: the config username+password. Lets
         # curl, scanners, and the agent authenticate without the web login flow.
+        # Disabled entirely when no password is configured (no committed fallback).
         cfg = get_config()
         expected = os.environ.get(cfg.auth.password_env) or cfg.auth.dev_password
-        if credentials.username == cfg.auth.username and secrets.compare_digest(
+        if expected and credentials.username == cfg.auth.username and secrets.compare_digest(
             credentials.password, expected
         ):
             return credentials.username

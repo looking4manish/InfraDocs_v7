@@ -97,7 +97,9 @@ class LoggingConfig(BaseModel):
 class AuthConfig(BaseModel):
     username: str
     password_env: str = "INFRADOCS_API_PASSWORD"
-    dev_password: str = "changeme"
+    # No committed fallback secret. When neither the env var nor an explicit
+    # dev_password is set, the config-credential Basic path is disabled entirely.
+    dev_password: Optional[str] = None
 
 
 class FederationConfig(BaseModel):
