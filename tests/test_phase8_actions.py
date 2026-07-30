@@ -90,8 +90,12 @@ def test_self_action_refused_for_infradocs_v6_unit():
 
 
 def test_self_action_refused_does_not_match_unrelated_unit():
-    """A unit named `infradocs.service` (no -v6-) is NOT self-protected."""
-    asset = _systemd_asset(name="infradocs.service")
+    """Self-protection must not over-match: a unit that does NOT start with the
+    `infradocs` prefix (e.g. `grafana.service`) is freely actionable. NB: since P0.3
+    the guard prefix is `infradocs` (covers the docker containers infradocs-api-1/…
+    AND the legacy infradocs-v6-* units), so a bare `infradocs.service` IS protected —
+    the unrelated case is any non-`infradocs*` unit."""
+    asset = _systemd_asset(name="grafana.service")
     with patch("app.actions._run_subprocess") as run:
         run.return_value = ActionResult(status="success", return_code=0)
         result = dispatch(asset, "restart")

@@ -107,7 +107,11 @@ class NginxScanner(BaseScanner):
             assets.extend(self._parse_file(p, Path(hostpath.to_real(read_path))))
         return assets
 
-    def _parse_file(self, read_path: Path, path: Path) -> List[Dict[str, Any]]:
+    def _parse_file(self, read_path: Path, path: Optional[Path] = None) -> List[Dict[str, Any]]:
+        # Native / direct callers pass a single real path; the containerized `scan()`
+        # passes the readable (/host-prefixed) path plus the real host path to report.
+        if path is None:
+            path = read_path
         try:
             content = read_path.read_text()
         except (OSError, UnicodeDecodeError) as e:

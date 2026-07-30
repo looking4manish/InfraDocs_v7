@@ -43,8 +43,9 @@ from app.core import hostpath
 
 # In a container the host root is mounted here; read filesystem scans through it
 # but record the REAL host path so it matches asset paths from docker/scanners.
-# Single source of truth: `app.core.hostpath` owns the env read + the mapping.
-_HOST_ROOT = hostpath.HOST_ROOT
+# Single source of truth: `app.core.hostpath` owns the env read + the mapping —
+# always read `hostpath.HOST_ROOT` live (never snapshot it), so both the reads
+# below and the `_to_real` mapping stay on the exact same value.
 
 _MARKERS = ("docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml", ".git")
 _SKIP_DIRS = {
@@ -126,14 +127,14 @@ def _skip_mountpoints() -> Set[str]:
             lines = f.readlines()
     except OSError:
         return set()
-    return _parse_skip_mounts(lines, _HOST_ROOT)
+    return _parse_skip_mounts(lines, hostpath.HOST_ROOT)
 
 
 def _read_base(root: Path) -> Optional[Path]:
-    """Where to actually read `root` from. In a container (_HOST_ROOT set) ALWAYS go
+    """Where to actually read `root` from. In a container (HOST_ROOT set) ALWAYS go
     via /host — the container's own /data, /srv, … are not the host's. Native: direct."""
-    if _HOST_ROOT:
-        hp = Path(_HOST_ROOT + str(root))
+    if hostpath.HOST_ROOT:
+        hp = Path(hostpath.HOST_ROOT + str(root))
         return hp if hp.exists() else None
     return root if root.exists() else None
 
@@ -229,7 +230,7 @@ class ProjectDetector:
             [str(r) for r in [self.projects_root, *self.direct_roots]],
             [str(r) for r in self.scan_roots],
             scan_depth, _MAX_DEPTH, timeout, _MAX_DIRS_VISITED,
-            _HOST_ROOT or "(native)",
+            hostpath.HOST_ROOT or "(native)",
             len(self.exclude_paths), sorted(self.exclude_paths),
         )
 
@@ -309,7 +310,7 @@ class ProjectDetector:
                     "/host mount (INFRADOCS_HOST_ROOT=%r) — the container is likely "
                     "missing the '/:/host:ro' bind; NO host applications can be "
                     "discovered until this is fixed",
-                    _HOST_ROOT or "(native)",
+                    hostpath.HOST_ROOT or "(native)",
                 )
             else:
                 self._log.info("project_detector: scan root absent, skipping: %s", root)

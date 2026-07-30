@@ -132,11 +132,12 @@ def test_data_app_surfaces_end_to_end_from_root_walk(tmp_path, monkeypatch):
     default walk from `/` and surfaces as an application bucket with its real host
     path — no per-box INFRADOCS_* override, /data never named."""
     import app.core.project_detector as pdmod
+    import app.core.hostpath as hp
     from app.core.config_loader import DEFAULT_SCAN_ROOTS, DEFAULT_SCAN_EXCLUSIONS
 
     host = tmp_path / "host"
     (host / "data" / "mxh" / ".git").mkdir(parents=True)
-    monkeypatch.setattr(pdmod, "_HOST_ROOT", str(host))
+    monkeypatch.setattr(hp, "HOST_ROOT", str(host))
 
     pd = pdmod.ProjectDetector(
         projects_root="/home/msinha/projects",

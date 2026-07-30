@@ -139,9 +139,10 @@ def test_multi_service_app_collapses_to_one_project(monkeypatch):
     monkeypatch.setattr(sc, "_list_unit_file_names",
                         lambda t: list(shows) if t == "service" else [])
     monkeypatch.setattr(sc, "_systemctl_show", lambda n: shows.get(n, {}))
-    # run only the promotion pre-pass (skip the real `systemctl list-units` subprocess)
-    monkeypatch.setattr("app.scanners.systemd.subprocess.run",
-                        lambda *a, **k: type("R", (), {"stdout": "", "returncode": 0})())
+    # run only the promotion pre-pass: stub the shared command runner so the real
+    # `systemctl list-units` augmentation is skipped (returning None is its documented
+    # failure/best-effort contract) and only the patched fakes above drive the pass.
+    monkeypatch.setattr(sc, "run_cmd", lambda *a, **k: None)
     sc._promote_service_dirs()
 
     a_proxy = sc._build_unit_asset("service", "systemd_service", "mdb-discovery-proxy.service",

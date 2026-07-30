@@ -64,7 +64,7 @@ def test_host_root_translation(tmp_path, monkeypatch):
     host = tmp_path / "host"
     (host / "srv" / "app").mkdir(parents=True)
     (host / "srv" / "app" / "docker-compose.yml").write_text("services: {}")
-    monkeypatch.setattr("app.core.project_detector._HOST_ROOT", str(host))
+    monkeypatch.setattr("app.core.hostpath.HOST_ROOT", str(host))
 
     pd = ProjectDetector(projects_root="/nonexistent", scan_roots=["/srv"], scan_depth=3)
     assert "app" in pd.list_projects()
@@ -241,7 +241,7 @@ def test_walk_from_root_finds_app_under_arbitrary_top_level_dir(tmp_path, monkey
     (host / "data" / "acme" / "docker-compose.yml").parent.mkdir(parents=True)
     (host / "data" / "acme" / "docker-compose.yml").write_text("services: {}")
     (host / "opt" / "grafana").mkdir(parents=True)                # marker-less install root
-    monkeypatch.setattr("app.core.project_detector._HOST_ROOT", str(host))
+    monkeypatch.setattr("app.core.hostpath.HOST_ROOT", str(host))
 
     pd = ProjectDetector(
         projects_root="/home/msinha/projects",
@@ -261,7 +261,7 @@ def test_walk_from_root_prunes_excluded_trees(tmp_path, monkeypatch):
     host = tmp_path / "host"
     (host / "usr" / "lib" / "somepkg" / ".git").mkdir(parents=True)   # excluded
     (host / "usr" / "local" / "realapp" / ".git").mkdir(parents=True)  # NOT excluded
-    monkeypatch.setattr("app.core.project_detector._HOST_ROOT", str(host))
+    monkeypatch.setattr("app.core.hostpath.HOST_ROOT", str(host))
 
     pd = ProjectDetector(
         projects_root="/nonexistent",
@@ -282,7 +282,7 @@ def test_configured_exclusion_prunes_even_permissioned_dir(tmp_path, monkeypatch
     host = tmp_path / "host"
     (host / "var" / "log" / "app" / ".git").mkdir(parents=True)  # /var/log excluded
     (host / "data" / "keep" / ".git").mkdir(parents=True)
-    monkeypatch.setattr("app.core.project_detector._HOST_ROOT", str(host))
+    monkeypatch.setattr("app.core.hostpath.HOST_ROOT", str(host))
     pd = ProjectDetector(
         projects_root="/nope", scan_roots=["/"], scan_depth=4,
         exclude_paths=["/var/log", "/var/cache"],
@@ -295,7 +295,7 @@ def test_filesystem_root_unreadable_via_host_mount_fails_loud(tmp_path, monkeypa
     """If `/` can't be read through the /host mount (mount missing/broken), log a
     LOUD, named ERROR — a misconfigured mount must be obvious, not silent."""
     # HOST_ROOT points at a path with no readable root, so _read_base('/') is None.
-    monkeypatch.setattr("app.core.project_detector._HOST_ROOT", str(tmp_path / "missing_host"))
+    monkeypatch.setattr("app.core.hostpath.HOST_ROOT", str(tmp_path / "missing_host"))
     with caplog.at_level("ERROR", logger="app.core.project_detector"):
         pd = ProjectDetector(projects_root="/nonexistent", scan_roots=["/"])
     assert pd.list_projects() == []
