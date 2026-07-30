@@ -53,6 +53,16 @@ def _asset_label(x) -> str:
 
 SYSTEM_BUCKET = "System"
 
+# Categories the passes below explicitly place into app buckets. Anything else must
+# still be surfaced (in its project bucket or System) — never silently dropped — so
+# the module's "nothing is dropped" invariant actually holds. See the catch-all pass.
+_HANDLED_CATEGORIES = frozenset({
+    "docker_compose", "docker_container", "docker_image", "docker_volume",
+    "docker_network", "nginx_server_block", "tls_certificate", "caddy_site",
+    "cloudflare_tunnel", "systemd_service", "systemd_timer", "network_port",
+    "storage_mount",
+})
+
 
 def _empty_app(name: str, *, source: Optional[str], type_: str) -> Dict[str, Any]:
     """Empty application document. `type_` is "project" or "system"."""
@@ -81,6 +91,7 @@ def _empty_app(name: str, *, source: Optional[str], type_: str) -> Dict[str, Any
         "cloudflare": False,
         "env_keys": [],
         "components_count": 0,
+        "other_assets": [],  # assets of a category no pass handles — surfaced, not dropped
         "links": [],
         "containers_detail": [],
         "nginx_detail": [],
@@ -599,6 +610,26 @@ def correlate(
         except Exception as _e:
             logger.error("correlate: skipping asset %s — %s: %s", _asset_label(m), type(_e).__name__, _e, exc_info=True)
             continue
+    # ---- Pass 9b: catch-all — never silently drop an unhandled category ----
+    # A new/unknown scanner category would otherwise vanish from the application
+    # view (no pass places it), quietly breaking the "nothing is dropped"
+    # invariant. Route each to its project bucket (else System) as evidence.
+    for cat, items in by_cat.items():
+        if cat in _HANDLED_CATEGORIES:
+            continue
+        logger.warning("correlate[%s]: %d asset(s) of unhandled category '%s' — routing to "
+                       "buckets as other_assets (add a pass to classify them)", server_id, len(items), cat)
+        for a in items:
+            try:
+                app_name = _route(a.get("project") or SYSTEM_BUCKET)
+                app = apps[app_name]
+                entry = {"category": cat, "name": a.get("name")}
+                if entry not in app["other_assets"]:
+                    app["other_assets"].append(entry)
+                _link(app, cat, a.get("name") or "?", "application", app_name, "unclassified", 9)
+            except Exception as _e:
+                logger.error("correlate: skipping asset %s — %s: %s", _asset_label(a), type(_e).__name__, _e, exc_info=True)
+                continue
     # ---- Pass 10: project_dir size for project apps -----------------------
     # Size the app's OWN discovered directory wherever it lives (/opt/x, /srv/y,
     # …), not just projects_root/<name>. `source` is the real host path the
@@ -646,10 +677,15 @@ def correlate(
                 "storage_paths",
                 "storage_mounts",
                 "env_keys",
-                "listening_ports",
             ):
                 if isinstance(app.get(k), list):
                     app[k] = sorted(set(app[k]), key=str)
+
+            # Ports are ints — sort NUMERICALLY. The str-keyed sort above put 100
+            # before 22 (lexicographic), so ports listed in a nonsensical order.
+            if isinstance(app.get("listening_ports"), list):
+                app["listening_ports"] = sorted({p for p in app["listening_ports"]
+                                                 if isinstance(p, int)})
 
             seen_links: Set[tuple] = set()
             deduped: List[Dict[str, Any]] = []

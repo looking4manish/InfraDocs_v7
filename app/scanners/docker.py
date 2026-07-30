@@ -77,7 +77,12 @@ class DockerScanner(BaseScanner):
 
     def scan(self) -> List[Dict[str, Any]]:
         if not self.client:
-            return []
+            # Hard dependency down — the daemon is unreachable, so this is a FAILURE,
+            # not an empty success. Raising lets base.execute() mark status="failed":
+            # the scan job then reports the run as failed instead of quietly wiping the
+            # entire docker inventory (correlator would rebuild from zero docker assets)
+            # and calling it success.
+            raise DockerException("docker daemon unreachable — scan aborted")
         return (
             self._scan_containers()
             + self._scan_images()

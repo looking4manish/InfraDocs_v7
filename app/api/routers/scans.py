@@ -56,6 +56,7 @@ def _run_scan_job(scan_id: str, cfg: Config):
     per_scanner = []
     all_assets = []
     failed = []
+    degraded = []   # ran but hit per-item errors (partial_success) — surfaced, not hidden
 
     for name in cfg.scanning.enabled_scanners:
         cls = SCANNERS.get(name)
@@ -77,6 +78,8 @@ def _run_scan_job(scan_id: str, cfg: Config):
             all_assets.append(asset)
         if result["status"] == "failed":
             failed.append(result["scanner"])
+        elif result["status"] != "success":
+            degraded.append(result["scanner"])
 
     # Correlation pass
     applications = correlate(
@@ -124,13 +127,14 @@ def _run_scan_job(scan_id: str, cfg: Config):
         {"scan_id": scan_id},
         {
             "$set": {
-                "status": "failed" if failed else "success",
+                "status": "failed" if failed else ("degraded" if degraded else "success"),
                 "finished_at": finished,
                 "duration_seconds": (finished - started).total_seconds(),
                 "total_assets": len(all_assets),
                 "applications_built": apps_written,
                 "scanners": per_scanner,
                 "failed_scanners": failed,
+                "degraded_scanners": degraded,
             }
         },
     )

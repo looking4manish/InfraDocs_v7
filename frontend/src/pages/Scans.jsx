@@ -9,6 +9,8 @@ function StatusPill({ status }) {
       ? "bg-amber-500/20 text-amber-300"
       : status === "failed"
       ? "bg-rose-500/20 text-rose-300"
+      : status === "degraded"
+      ? "bg-amber-500/20 text-amber-300"
       : "bg-slate-500/20 text-slate-300";
   return <span className={`text-xs px-2 py-0.5 rounded ${tone}`}>{status}</span>;
 }
