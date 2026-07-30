@@ -1,22 +1,28 @@
-P1.9: correlator catch-all + numeric port sort; docker-down is a failure
+P2.10: unify host-path mapping onto core/hostpath; route nginx/certs/cron through it
 
-Three correctness bugs:
+Three parallel host-path implementations had drifted apart. Consolidated onto
+app.core.hostpath as the single source of truth:
 
-1. Correlator silently dropped any asset whose category no pass handles, quietly
-   breaking the module's stated "nothing is dropped" invariant. Added a catch-all
-   pass (9b) that routes unhandled categories to their project bucket (else System)
-   as `other_assets` + a warning log, and an `other_assets` field on every app.
+- hostpath.to_real() is now the canonical REAL-path mapper (public), and
+  handles the HOST_ROOT-itself -> "/" case. _to_real kept as an internal alias.
+- project_detector reads HOST_ROOT from hostpath (one env read) and its Path
+  _to_real() delegates to hostpath.to_real() — same semantics, no drift. The
+  name is still exported for compose.py.
+- storage.py imports HOST_ROOT from hostpath instead of re-reading the env.
 
-2. listening_ports were sorted with key=str (lexicographic): 100 sorted before 22.
-   Removed them from the string-keyed sort and sort numerically (ints only).
+The nginx/certs/cron scanners previously read /etc/nginx, /etc/letsencrypt and
+/etc/cron* DIRECTLY, so in a container (/:/host:ro) they saw the container's
+own empty /etc, not the host's. Routed each through hostpath so a dockerized
+scan reads the real host configs via /host and reports REAL host paths:
 
-3. Docker-daemon-down was reported as a SUCCESSFUL scan. The scanner called
-   add_error -> status "partial_success"; the scan job only treated "failed" as a
-   failure, so a totally-down daemon (zero docker assets) reported success AND the
-   correlator then rebuilt from zero, wiping the whole docker inventory. Now:
-   - DockerScanner.scan() raises when the daemon is unreachable -> status "failed".
-   - the scan job distinguishes failed vs degraded (partial per-item errors),
-     records degraded_scanners, and sets the run status to
-     failed | degraded | success. Scans.jsx renders a degraded (amber) pill.
+- nginx: scans hostpath.host_glob() of sites-enabled/conf.d; presence of config
+  files (not a local nginx binary) gates the scan; certs read via to_read_path.
+- certs: lineage listing + cert reads go through the /host mount, with the
+  native ls/openssl + sudo -n fallback preserved for root-only native installs.
+- cron: /etc/crontab, /etc/cron.d, spool, and periodic dirs read via
+  read_host_configs/host_glob; periodic-dir commands report the real host path.
+
+Native behavior (HOST_ROOT unset) is unchanged: host_glob/to_read_path are
+no-ops, so all mapping collapses to the original direct reads.
 
 Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>

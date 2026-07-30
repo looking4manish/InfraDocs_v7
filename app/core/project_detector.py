@@ -39,9 +39,12 @@ import time
 from pathlib import Path
 from typing import Dict, List, Optional, Set
 
+from app.core import hostpath
+
 # In a container the host root is mounted here; read filesystem scans through it
 # but record the REAL host path so it matches asset paths from docker/scanners.
-_HOST_ROOT = os.environ.get("INFRADOCS_HOST_ROOT", "").rstrip("/")
+# Single source of truth: `app.core.hostpath` owns the env read + the mapping.
+_HOST_ROOT = hostpath.HOST_ROOT
 
 _MARKERS = ("docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml", ".git")
 _SKIP_DIRS = {
@@ -136,13 +139,9 @@ def _read_base(root: Path) -> Optional[Path]:
 
 
 def _to_real(p: Path) -> Path:
-    """Strip the /host prefix so stored paths are the real host paths."""
-    s = str(p)
-    if _HOST_ROOT and s.startswith(_HOST_ROOT + "/"):
-        return Path(s[len(_HOST_ROOT):])
-    if _HOST_ROOT and s == _HOST_ROOT:
-        return Path("/")
-    return p
+    """Strip the /host prefix so stored paths are the real host paths. Path-typed
+    wrapper over the canonical `hostpath.to_real` (compose.py imports this name)."""
+    return Path(hostpath.to_real(str(p)))
 
 
 def attach_root_paths(applications: List[dict], project_paths: Dict[str, str]) -> None:

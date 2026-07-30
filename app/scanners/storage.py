@@ -10,10 +10,8 @@ import os
 import subprocess
 from typing import Any, Dict, List
 
+from app.core.hostpath import HOST_ROOT  # single source of truth (empty = native)
 from app.scanners.base import BaseScanner
-
-# Set to the host-root mount inside a container (e.g. "/host"); empty = native.
-HOST_ROOT = os.environ.get("INFRADOCS_HOST_ROOT", "").rstrip("/")
 
 SKIP_SOURCES = {"tmpfs", "devtmpfs", "udev", "overlay", "squashfs"}
 # Pseudo / virtual filesystems that are never real storage.

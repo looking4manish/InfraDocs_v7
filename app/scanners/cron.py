@@ -18,6 +18,7 @@ import subprocess
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from app.core import hostpath
 from app.scanners.base import BaseScanner
 
 # Absolute paths mentioned in a command, used to attribute a job to a project.
@@ -63,71 +64,47 @@ class CronScanner(BaseScanner):
         except Exception as e:
             self.add_error(f"crontab -l failed: {e}")
 
-        for spool in ("/var/spool/cron/crontabs", "/var/spool/cron"):
-            d = Path(spool)
-            if not d.is_dir():
-                continue
-            try:
-                entries = list(d.iterdir())
-            except OSError:
-                continue
-            for f in entries:
-                try:
-                    text = f.read_text(errors="replace")
-                except OSError:
-                    continue  # root-only spool — skip quietly
-                out += self._parse_lines(text, source=f"spool:{f.name}",
-                                         has_user_field=False, default_user=f.name)
+        # Spool crontabs — read through the /host mount when containerized. The
+        # spool file's name IS the owning user. `read_host_configs` yields the REAL
+        # host path so `source`/user are reported correctly.
+        for real_path, text in hostpath.read_host_configs(
+            ["/var/spool/cron/crontabs/*", "/var/spool/cron/*"]
+        ):
+            name = Path(real_path).name
+            out += self._parse_lines(text, source=f"spool:{name}",
+                                     has_user_field=False, default_user=name)
         return out
 
     def _scan_system_crontab(self) -> List[Dict[str, Any]]:
-        p = Path("/etc/crontab")
-        if not p.is_file():
-            return []
-        try:
-            text = p.read_text(errors="replace")
-        except OSError as e:
-            self.add_error(f"read /etc/crontab: {e}")
-            return []
-        return self._parse_lines(text, source="/etc/crontab", has_user_field=True)
+        out: List[Dict[str, Any]] = []
+        for real_path, text in hostpath.read_host_configs(["/etc/crontab"]):
+            out += self._parse_lines(text, source="/etc/crontab", has_user_field=True)
+        return out
 
     def _scan_cron_d(self) -> List[Dict[str, Any]]:
-        d = Path("/etc/cron.d")
-        if not d.is_dir():
-            return []
         out: List[Dict[str, Any]] = []
-        try:
-            files = sorted(d.iterdir())
-        except OSError:
-            return []
-        for f in files:
-            if not f.is_file():
-                continue
-            try:
-                text = f.read_text(errors="replace")
-            except OSError:
-                continue
-            out += self._parse_lines(text, source=f"/etc/cron.d/{f.name}", has_user_field=True)
+        for real_path, text in sorted(hostpath.read_host_configs(["/etc/cron.d/*"])):
+            name = Path(real_path).name
+            out += self._parse_lines(text, source=f"/etc/cron.d/{name}", has_user_field=True)
         return out
 
     def _scan_periodic_dirs(self) -> List[Dict[str, Any]]:
-        """run-parts dirs: each executable script runs on the dir's cadence."""
+        """run-parts dirs: each executable script runs on the dir's cadence. The
+        command IS the REAL host script path (that's what cron runs)."""
         out: List[Dict[str, Any]] = []
         for cadence in ("hourly", "daily", "weekly", "monthly"):
-            d = Path(f"/etc/cron.{cadence}")
-            if not d.is_dir():
-                continue
-            try:
-                files = sorted(d.iterdir())
-            except OSError:
-                continue
-            for f in files:
-                if not f.is_file() or f.name in (".placeholder", "0anacron"):
+            for read_path in sorted(hostpath.host_glob([f"/etc/cron.{cadence}/*"])):
+                try:
+                    if not Path(read_path).is_file():
+                        continue
+                except OSError:
                     continue
-                command = str(f)
+                real = hostpath.to_real(read_path)
+                if Path(real).name in (".placeholder", "0anacron"):
+                    continue
                 out.append(self._make_asset(
-                    schedule=f"@{cadence}", command=command, user="root",
-                    source=f"/etc/cron.{cadence}", raw=f"run-parts {command}",
+                    schedule=f"@{cadence}", command=real, user="root",
+                    source=f"/etc/cron.{cadence}", raw=f"run-parts {real}",
                 ))
         return out
 

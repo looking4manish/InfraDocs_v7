@@ -11,10 +11,20 @@ from typing import Iterator, List, Tuple
 HOST_ROOT = os.environ.get("INFRADOCS_HOST_ROOT", "").rstrip("/")
 
 
-def _to_real(p: str) -> str:
+def to_real(p: str) -> str:
+    """Strip the /host mount prefix so a readable path becomes the REAL host path
+    it should be stored/reported as. `HOST_ROOT` itself maps to "/" (the whole-host
+    bind). Native (no HOST_ROOT) is a no-op. Single source of truth for host-path
+    mapping — project_detector and the path-based scanners all route through here."""
     if HOST_ROOT and p.startswith(HOST_ROOT + "/"):
         return p[len(HOST_ROOT):]
+    if HOST_ROOT and p == HOST_ROOT:
+        return "/"
     return p
+
+
+# Back-compat alias for internal callers below.
+_to_real = to_real
 
 
 def to_read_path(real_path: str) -> str:

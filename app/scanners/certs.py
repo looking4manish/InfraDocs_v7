@@ -13,8 +13,10 @@ from __future__ import annotations
 
 import subprocess
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from app.core import hostpath
 from app.scanners.base import BaseScanner
 
 LE_LIVE = "/etc/letsencrypt/live"
@@ -43,7 +45,18 @@ class CertScanner(BaseScanner):
         return assets
 
     def _lineages(self) -> List[str]:
-        """List cert lineage dirs under /etc/letsencrypt/live (sudo fallback)."""
+        """List cert lineage dirs under /etc/letsencrypt/live. In a container the
+        root-owned dir is reachable via the /host mount; native falls back to
+        `ls` then `sudo -n ls`."""
+        dirs = hostpath.host_glob([f"{LE_LIVE}/*"])
+        if dirs:
+            out = []
+            for d in dirs:
+                name = Path(d).name
+                if name and name != "README":
+                    out.append(name)
+            if out:
+                return out
         r = _run(["ls", "-1", LE_LIVE])
         if not r or r.returncode != 0:
             r = _run(["sudo", "-n", "ls", "-1", LE_LIVE])
@@ -58,14 +71,20 @@ class CertScanner(BaseScanner):
         return out
 
     def _read_cert(self, path: str) -> Dict[str, Any]:
+        """`path` is the REAL host cert path. Read it via the /host mount if that's
+        where this process can reach it; else openssl directly, then `sudo -n`."""
+        read_path = hostpath.to_read_path(path)
         args = [
-            "openssl", "x509", "-in", path, "-noout",
+            "openssl", "x509", "-in", read_path, "-noout",
             "-enddate", "-startdate", "-issuer", "-subject",
             "-ext", "subjectAltName",
         ]
         r = _run(args)
         if not r or r.returncode != 0:
-            r = _run(["sudo", "-n"] + args)
+            # sudo fallback reads the REAL path (native root-only cert, no /host).
+            r = _run(["sudo", "-n", "openssl", "x509", "-in", path, "-noout",
+                      "-enddate", "-startdate", "-issuer", "-subject",
+                      "-ext", "subjectAltName"])
         if not r or r.returncode != 0:
             return {}
         return self._parse_openssl(r.stdout)

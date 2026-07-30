@@ -6,20 +6,23 @@ blocks. V6 uses a brace-balanced extractor that handles arbitrary nesting.
 """
 
 import re
-import shutil
 import subprocess
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from app.core import hostpath
 from app.scanners.base import BaseScanner
 
 
 def _read_cert_info(cert_path: str) -> Dict[str, Any]:
-    """Read SSL cert issuer + expiry. Returns empty dict on any failure."""
+    """Read SSL cert issuer + expiry. Returns empty dict on any failure. `cert_path`
+    is a REAL host path; read it at the path this process can actually reach (the
+    /host mount inside a container)."""
     if not cert_path:
         return {}
+    read_path = hostpath.to_read_path(cert_path)
     try:
-        if not Path(cert_path).exists():
+        if not Path(read_path).exists():
             return {}
     except (OSError, PermissionError):
         # /etc/letsencrypt/live is typically root:root 0700 — we can't even
@@ -27,7 +30,7 @@ def _read_cert_info(cert_path: str) -> Dict[str, Any]:
         pass
     try:
         result = subprocess.run(
-            ["openssl", "x509", "-noout", "-issuer", "-enddate", "-in", cert_path],
+            ["openssl", "x509", "-noout", "-issuer", "-enddate", "-in", read_path],
             capture_output=True,
             text=True,
             timeout=3,
@@ -76,9 +79,13 @@ def _parse_upstream(upstream: str) -> Tuple[Optional[str], Optional[int]]:
     return (host_port, None)
 
 
-NGINX_CONFIG_DIRS = (
-    Path("/etc/nginx/sites-enabled"),
-    Path("/etc/nginx/conf.d"),
+# Real host globs for the enabled server-block files. Resolved through
+# `hostpath` so a containerized scan reads the host's configs via /host and
+# reports the REAL host paths (presence of matching files — not a local nginx
+# binary — is what tells us there's anything to scan).
+NGINX_CONFIG_GLOBS = (
+    "/etc/nginx/sites-enabled/*",
+    "/etc/nginx/conf.d/*",
 )
 
 
@@ -88,27 +95,21 @@ class NginxScanner(BaseScanner):
         return "nginx"
 
     def scan(self) -> List[Dict[str, Any]]:
-        if not shutil.which("nginx"):
-            return []
-
         assets: List[Dict[str, Any]] = []
-        for cfg_dir in NGINX_CONFIG_DIRS:
-            if not cfg_dir.exists():
-                continue
+        for read_path in hostpath.host_glob(list(NGINX_CONFIG_GLOBS)):
+            p = Path(read_path)
             try:
-                entries = list(cfg_dir.iterdir())
-            except PermissionError as e:
-                self.add_error(f"cannot read {cfg_dir}: {e}")
+                if not (p.is_file() or p.is_symlink()):
+                    continue
+            except OSError:
                 continue
-
-            for entry in entries:
-                if entry.is_file() or entry.is_symlink():
-                    assets.extend(self._parse_file(entry))
+            # Report the REAL host path; read from the (maybe /host-prefixed) one.
+            assets.extend(self._parse_file(p, Path(hostpath.to_real(read_path))))
         return assets
 
-    def _parse_file(self, path: Path) -> List[Dict[str, Any]]:
+    def _parse_file(self, read_path: Path, path: Path) -> List[Dict[str, Any]]:
         try:
-            content = path.read_text()
+            content = read_path.read_text()
         except (OSError, UnicodeDecodeError) as e:
             self.add_error(f"read {path}: {e}")
             return []
