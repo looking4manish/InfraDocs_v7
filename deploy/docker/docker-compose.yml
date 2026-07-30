@@ -8,7 +8,7 @@ name: infradocs
 
 services:
   mongo:
-    image: mongo:7
+    image: "${MONGO_IMAGE:-mongo:7}"
     restart: unless-stopped
     # --auth enforces access control; the root user below is created on a FRESH volume.
     # Bound to 127.0.0.1 only, but the API is host-network so every host-local process
@@ -95,7 +95,9 @@ services:
   # tunnel in CF Zero Trust, route your hostname -> http://localhost:${WEB_PORT},
   # set CF_TUNNEL_TOKEN + COMPOSE_PROFILES=cloudflare.
   cloudflared:
-    image: cloudflare/cloudflared:latest
+    # Floating `:latest` by default — pin CLOUDFLARED_IMAGE in .env to a digest so a
+    # `docker compose pull` can't silently swap the tunnel binary (see .env.example).
+    image: "${CLOUDFLARED_IMAGE:-cloudflare/cloudflared:latest}"
     profiles: ["cloudflare"]
     restart: unless-stopped
     network_mode: host
@@ -107,7 +109,8 @@ services:
   # Needs Funnel+HTTPS enabled on the tailnet and a reusable auth key as TS_AUTHKEY;
   # set COMPOSE_PROFILES=tailscale.
   tailscale:
-    image: tailscale/tailscale:latest
+    # Pin TAILSCALE_IMAGE in .env to a digest to freeze this (see .env.example).
+    image: "${TAILSCALE_IMAGE:-tailscale/tailscale:latest}"
     profiles: ["tailscale"]
     restart: unless-stopped
     network_mode: host

@@ -3,9 +3,11 @@
 FROM node:20-slim AS build
 WORKDIR /app
 COPY frontend/package.json frontend/package-lock.json* ./
-RUN npm install
+# `npm ci` builds strictly from the committed lockfile — deterministic and
+# reproducible, unlike `npm install` which can silently drift the dep tree.
+RUN npm ci
 COPY frontend/ ./
-RUN npx vite build
+RUN npm run build
 
 FROM caddy:2-alpine
 COPY --from=build /app/dist /srv
