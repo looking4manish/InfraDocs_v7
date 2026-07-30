@@ -5,7 +5,7 @@ import logging
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
-from app.api.dependencies import get_config, get_db, verify_auth
+from app.api.dependencies import get_config, get_db, require_operator, verify_auth
 from app.blast_radius import compute_blast_radius
 from app.core.config_loader import Config
 from app.core.db_manager import DBManager
@@ -56,7 +56,7 @@ def application_teardown(
     req: TeardownRequest = Body(...),
     db: DBManager = Depends(get_db),
     cfg: Config = Depends(get_config),
-    actor: str = Depends(verify_auth),
+    actor: str = Depends(require_operator),
 ):
     """The Kill Button. dry_run=True (default) returns the ordered plan and removes
     nothing. dry_run=False requires confirm == project name and executes the

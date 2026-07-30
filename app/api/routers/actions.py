@@ -12,7 +12,7 @@ from app.actions import (
     SelfActionRefused,
     dispatch,
 )
-from app.api.dependencies import get_db, verify_auth
+from app.api.dependencies import get_db, require_operator, verify_auth
 from app.core.db_manager import DBManager
 
 router = APIRouter()
@@ -57,7 +57,7 @@ def asset_action(
     asset_id: str,
     req: ActionRequest = Body(...),
     db: DBManager = Depends(get_db),
-    actor: str = Depends(verify_auth),
+    actor: str = Depends(require_operator),
 ):
     asset = db.db.assets.find_one({"asset_id": asset_id})
     if not asset:
@@ -102,7 +102,7 @@ def application_action(
     name: str,
     req: ActionRequest = Body(...),
     db: DBManager = Depends(get_db),
-    actor: str = Depends(verify_auth),
+    actor: str = Depends(require_operator),
 ):
     """Fire an action against every container + systemd unit in an app."""
     app_doc = db.get_application(name)

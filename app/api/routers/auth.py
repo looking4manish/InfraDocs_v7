@@ -43,6 +43,7 @@ def login(req: LoginRequest, db: DBManager = Depends(get_db)):
     return {
         "token": token,
         "username": req.username,
+        "role": user.get("role") or "operator",
         "must_change_password": bool(user.get("must_change_password")),
     }
 
@@ -73,4 +74,5 @@ def logout(authorization: Optional[str] = Header(None), db: DBManager = Depends(
 @router.get("/me")
 def me(actor: str = Depends(verify_auth), db: DBManager = Depends(get_db)):
     user = A.get_user(db, actor) or {}
-    return {"username": actor, "must_change_password": bool(user.get("must_change_password"))}
+    return {"username": actor, "role": user.get("role") or "operator",
+            "must_change_password": bool(user.get("must_change_password"))}

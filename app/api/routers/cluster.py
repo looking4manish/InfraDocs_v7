@@ -11,7 +11,7 @@ from pydantic import BaseModel
 
 from app import cluster as CC
 from app import cluster_manager as MGR
-from app.api.dependencies import get_config, get_db, verify_auth
+from app.api.dependencies import get_config, get_db, require_operator, verify_auth
 from app.api.routers.setup import enroll_secondary  # shared enroll path (no drift)
 from app.core.config_loader import Config
 from app.core.db_manager import DBManager
@@ -180,7 +180,7 @@ class OverrideRequest(BaseModel):
 
 
 @router.post("/override")
-def override(req: OverrideRequest, actor: str = Depends(verify_auth), db: DBManager = Depends(get_db)):
+def override(req: OverrideRequest, actor: str = Depends(require_operator), db: DBManager = Depends(get_db)):
     """Pin/unpin the current primary. While set, no node initiates an election (it's
     broadcast in /health and remembered by peers). The manual escape hatch."""
     _set_self(db, {"override": bool(req.value)})
@@ -197,7 +197,7 @@ class PromoteRequest(BaseModel):
 @router.post("/promote")
 def promote(
     req: PromoteRequest,
-    actor: str = Depends(verify_auth),
+    actor: str = Depends(require_operator),
     cfg: Config = Depends(get_config),
     db: DBManager = Depends(get_db),
 ):
@@ -267,7 +267,7 @@ class EnableRequest(BaseModel):
 
 
 @router.post("/enable")
-async def set_enabled(req: EnableRequest, request: Request, actor: str = Depends(verify_auth),
+async def set_enabled(req: EnableRequest, request: Request, actor: str = Depends(require_operator),
                 cfg: Config = Depends(get_config), db: DBManager = Depends(get_db)):
     """cluster_enabled switch. Persists a runtime override and starts/stops the gossip
     loop LIVE (no container restart). Disabling quiesces cleanly — role/roster are kept."""
@@ -287,7 +287,7 @@ class AutoFailoverRequest(BaseModel):
 
 
 @router.post("/auto-failover")
-def set_auto_failover(req: AutoFailoverRequest, actor: str = Depends(verify_auth),
+def set_auto_failover(req: AutoFailoverRequest, actor: str = Depends(require_operator),
                       cfg: Config = Depends(get_config), db: DBManager = Depends(get_db)):
     """Toggle AUTOMATIC failover. Persists a runtime override the live gossip loop re-reads
     every round (no restart). When OFF, a lost primary does NOT auto-promote a survivor —
@@ -304,7 +304,7 @@ class ToPrimaryRequest(BaseModel):
 
 
 @router.post("/to-primary")
-async def to_primary(req: ToPrimaryRequest, request: Request, actor: str = Depends(verify_auth),
+async def to_primary(req: ToPrimaryRequest, request: Request, actor: str = Depends(require_operator),
                cfg: Config = Depends(get_config), db: DBManager = Depends(get_db)):
     """Standalone -> Primary. This is a CONFIG FLIP (the cluster code always ships; only
     the gossip loop is gated): enable the cluster, take a free priority, serve as primary,
@@ -341,7 +341,7 @@ class JoinRequest(BaseModel):
 
 
 @router.post("/join")
-async def join(req: JoinRequest, request: Request, actor: str = Depends(verify_auth),
+async def join(req: JoinRequest, request: Request, actor: str = Depends(require_operator),
          cfg: Config = Depends(get_config), db: DBManager = Depends(get_db)):
     """Standalone OR Primary -> Secondary. Reuses the installer's canonical enroll path
     verbatim (setup.enroll_secondary -> federation.enroll_with_primary -> primary /enroll),
@@ -397,7 +397,7 @@ async def join(req: JoinRequest, request: Request, actor: str = Depends(verify_a
 
 
 @router.post("/demote")
-def demote(actor: str = Depends(verify_auth), cfg: Config = Depends(get_config),
+def demote(actor: str = Depends(require_operator), cfg: Config = Depends(get_config),
            db: DBManager = Depends(get_db)):
     """Primary -> Secondary. Refuse if override is pinned, or if no alternative primary is
     reachable (would leave the cluster leaderless)."""
@@ -424,7 +424,7 @@ class HandoffRequest(BaseModel):
 
 
 @router.post("/handoff")
-def handoff(req: HandoffRequest, actor: str = Depends(verify_auth),
+def handoff(req: HandoffRequest, actor: str = Depends(require_operator),
             cfg: Config = Depends(get_config), db: DBManager = Depends(get_db)):
     """Planned PRIMARY switchover to a healthy peer — the thing promote/demote can't do
     between two live nodes (each guard blocks the other). Runs on the CURRENT primary: step
@@ -499,7 +499,7 @@ class ToStandaloneRequest(BaseModel):
 
 
 @router.post("/to-standalone")
-async def to_standalone(req: ToStandaloneRequest, request: Request, actor: str = Depends(verify_auth),
+async def to_standalone(req: ToStandaloneRequest, request: Request, actor: str = Depends(require_operator),
                   cfg: Config = Depends(get_config), db: DBManager = Depends(get_db)):
     """Primary -> Standalone. Refuse (unless forced) while secondaries are still enrolled
     and redirecting here — otherwise they are orphaned. Forcing requires type-the-hostname
@@ -533,7 +533,7 @@ class PriorityRequest(BaseModel):
 
 
 @router.post("/priority")
-def set_priority(req: PriorityRequest, actor: str = Depends(verify_auth),
+def set_priority(req: PriorityRequest, actor: str = Depends(require_operator),
                  cfg: Config = Depends(get_config), db: DBManager = Depends(get_db)):
     """Reassign this node's failover priority (1-99). Rejects a number already in use by a
     known node — same rule the installer/enroll enforce."""
@@ -557,7 +557,7 @@ class EvictRequest(BaseModel):
 
 
 @router.post("/evict")
-def evict(req: EvictRequest, actor: str = Depends(verify_auth), cfg: Config = Depends(get_config),
+def evict(req: EvictRequest, actor: str = Depends(require_operator), cfg: Config = Depends(get_config),
           db: DBManager = Depends(get_db)):
     """De-enroll a node from the roster. Quorum-critical: a ghost node still counts toward
     the majority-guard denominator, so eviction deletes it AND tombstones it (so gossip

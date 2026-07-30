@@ -123,3 +123,52 @@ def require_real_user(actor: str = Depends(verify_auth)) -> str:
             detail="not permitted for the fleet service principal",
         )
     return actor
+
+
+# ---------------------------------------------------------------------------
+# Roles (RBAC). Two tiers: 'viewer' (read-only) and 'operator' (can fire actions,
+# teardowns, cluster transitions, token mint). Historically every authenticated
+# user was a full admin; to stay backward-compatible an account with NO explicit
+# role is treated as 'operator', and 'viewer' is an opt-in downgrade. Create a
+# read-only account by setting users.role = "viewer" in the DB.
+# ---------------------------------------------------------------------------
+ROLE_OPERATOR = "operator"
+ROLE_VIEWER = "viewer"
+
+
+def get_role(db: DBManager, principal: str) -> str:
+    # Relayed fleet requests + the auth-disabled dev bypass are operator-capable.
+    if principal in (FLEET_PRINCIPAL, ANON_PRINCIPAL):
+        return ROLE_OPERATOR
+    from app import auth as A  # lazy — avoids import cycle
+    u = A.get_user(db, principal)
+    if u is None:
+        # config-credential service account (not a DB user) — operator-capable.
+        return ROLE_OPERATOR
+    return u.get("role") or ROLE_OPERATOR
+
+
+def require_operator(
+    actor: str = Depends(verify_auth), db: DBManager = Depends(get_db)
+) -> str:
+    """Gate for any state-changing / privileged endpoint. Viewers get 403.
+    The 'fleet' relay principal is operator-capable so cross-node actions work."""
+    if get_role(db, actor) != ROLE_OPERATOR:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="operator role required for this action",
+        )
+    return actor
+
+
+def require_operator_user(
+    actor: str = Depends(require_real_user), db: DBManager = Depends(get_db)
+) -> str:
+    """Operator role AND a real user (not the relayed fleet principal) — for
+    fleet-credential-management endpoints (join-token mint/revoke)."""
+    if get_role(db, actor) != ROLE_OPERATOR:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="operator role required",
+        )
+    return actor

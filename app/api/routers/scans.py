@@ -7,7 +7,7 @@ from uuid import uuid4
 from fastapi import APIRouter, BackgroundTasks, Depends
 from pymongo import DESCENDING
 
-from app.api.dependencies import get_config, get_db, verify_auth
+from app.api.dependencies import get_config, get_db, require_operator, verify_auth
 from app.core.config_loader import Config
 from app.core.db_manager import DBManager
 from app.core.project_detector import (
@@ -141,7 +141,7 @@ def _run_scan_job(scan_id: str, cfg: Config):
 def trigger_scan(
     background: BackgroundTasks,
     cfg: Config = Depends(get_config),
-    _: str = Depends(verify_auth),
+    _: str = Depends(require_operator),
 ):
     scan_id = uuid4().hex
     background.add_task(_run_scan_job, scan_id, cfg)

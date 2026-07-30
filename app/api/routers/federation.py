@@ -19,7 +19,7 @@ from pydantic import BaseModel
 from app import cluster as CC
 from app import federation as F
 from app.cli_install import normalize_url
-from app.api.dependencies import get_config, get_db, require_real_user, verify_auth
+from app.api.dependencies import get_config, get_db, require_operator_user, verify_auth
 from app.core.config_loader import Config
 from app.core.db_manager import DBManager
 
@@ -31,7 +31,7 @@ class MintRequest(BaseModel):
 
 
 @router.post("/tokens")
-def mint_token(req: MintRequest, actor: str = Depends(require_real_user), db: DBManager = Depends(get_db)):
+def mint_token(req: MintRequest, actor: str = Depends(require_operator_user), db: DBManager = Depends(get_db)):
     """Primary mints a join token for a new secondary (shown in 'Add a server').
 
     The full token secret is returned ONCE here (to hand to the new node). It is never
@@ -69,7 +69,7 @@ def list_tokens(_: str = Depends(verify_auth), db: DBManager = Depends(get_db)):
 
 
 @router.delete("/tokens/{ident}")
-def revoke_token(ident: str, _: str = Depends(require_real_user), db: DBManager = Depends(get_db)):
+def revoke_token(ident: str, _: str = Depends(require_operator_user), db: DBManager = Depends(get_db)):
     """Revoke a join token so it can no longer enroll a secondary (same token store the
     installer's enroll validates against — revoking here closes that path everywhere).
     `ident` is the non-secret `jti` from the list view; the full token is also accepted

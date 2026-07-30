@@ -37,6 +37,7 @@ def seed_default_admin(db, username: str, default_password: str = DEFAULT_PASSWO
             "username": username,
             "password_hash": hash_password(default_password),
             "must_change_password": True,
+            "role": "operator",  # first account is a full operator; viewers are opt-in
             "created_at": datetime.now(timezone.utc),
         })
 
