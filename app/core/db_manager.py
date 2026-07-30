@@ -107,31 +107,61 @@ class DBManager:
             app["_id"] = str(app["_id"])
         return app
 
-    def replace_applications(self, new_apps: List[Dict]) -> int:
-        """Wipe and rewrite the applications collection — used by correlator."""
-        self.db.applications.delete_many({})
-        if not new_apps:
-            return 0
+    # Index specs mirrored onto the staging collection BEFORE an atomic swap, so the
+    # collection is fully indexed the instant it goes live (mirrors create_indexes()).
+    _REPLACE_INDEXES: Dict[str, List] = {
+        "applications": [
+            (("name", ASCENDING), {"unique": True}),
+            (("application_id", ASCENDING), {"unique": True}),
+            (("internet_exposed", ASCENDING), {}),
+        ],
+        "ports": [
+            (("port_id", ASCENDING), {"unique": True}),
+            (("port", ASCENDING), {}),
+            (("owner_project", ASCENDING), {}),
+            (("state", ASCENDING), {}),
+        ],
+        "storage": [
+            (("storage_id", ASCENDING), {"unique": True}),
+            (("kind", ASCENDING), {}),
+            (("owner_project", ASCENDING), {}),
+        ],
+    }
+
+    def _atomic_replace(self, name: str, docs: List[Dict]) -> int:
+        """Crash-safe whole-collection replace for the UI read models.
+
+        Builds a staging collection, then atomically renames it over the target
+        (renameCollection with dropTarget is atomic at the collection level). A reader
+        of `name` therefore sees either the entire old set or the entire new set — never
+        the empty window that the old delete_many()+insert_many() pair exposed on any
+        mid-scan crash or concurrent read. Standalone-Mongo safe: no multi-document
+        transaction / replica set required.
+        """
+        staging = f"{name}__staging"
+        self.db.drop_collection(staging)   # clear any leftover from a crashed prior run
+        coll = self.db.create_collection(staging)
         now = datetime.now(timezone.utc)
-        for a in new_apps:
-            a.setdefault("created_at", now)
-            a["updated_at"] = now
-        self.db.applications.insert_many(new_apps)
-        return len(new_apps)
+        if docs:
+            for d in docs:
+                d.setdefault("created_at", now)
+                d["updated_at"] = now
+            coll.insert_many(docs)
+        for keys, opts in self._REPLACE_INDEXES.get(name, []):
+            coll.create_index([keys], **opts)
+        # Atomic swap: target is dropped and staging takes its name in one operation.
+        coll.rename(name, dropTarget=True)
+        return len(docs)
+
+    def replace_applications(self, new_apps: List[Dict]) -> int:
+        """Atomically replace the applications collection — used by correlator."""
+        return self._atomic_replace("applications", new_apps)
 
     # ---------- ports registry (Phase 7B) ----------
 
     def replace_ports(self, new_ports: List[Dict]) -> int:
-        """Wipe and rewrite the ports collection — used by ports_registry."""
-        self.db.ports.delete_many({})
-        if not new_ports:
-            return 0
-        now = datetime.now(timezone.utc)
-        for p in new_ports:
-            p.setdefault("created_at", now)
-            p["updated_at"] = now
-        self.db.ports.insert_many(new_ports)
-        return len(new_ports)
+        """Atomically replace the ports collection — used by ports_registry."""
+        return self._atomic_replace("ports", new_ports)
 
     def get_ports(
         self,
@@ -160,15 +190,8 @@ class DBManager:
     # ---------- storage registry (Phase 7C) ----------
 
     def replace_storage(self, new_rows: List[Dict]) -> int:
-        self.db.storage.delete_many({})
-        if not new_rows:
-            return 0
-        now = datetime.now(timezone.utc)
-        for r in new_rows:
-            r.setdefault("created_at", now)
-            r["updated_at"] = now
-        self.db.storage.insert_many(new_rows)
-        return len(new_rows)
+        """Atomically replace the storage collection — used by storage_registry."""
+        return self._atomic_replace("storage", new_rows)
 
     def get_storage(
         self,
