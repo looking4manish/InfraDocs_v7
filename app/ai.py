@@ -10,8 +10,34 @@ import os
 import re
 import urllib.request
 from typing import Optional
+from urllib.parse import urlparse
 
 _JSON_RE = re.compile(r"\{.*\}", re.DOTALL)
+
+# Hosts that must never be reachable via the (operator-configurable) AI endpoint —
+# the classic SSRF pivot targets (cloud instance-metadata services). A local Ollama /
+# vLLM on localhost or the LAN is the normal case, so we DON'T blanket-block private
+# IPs; instead block metadata endpoints outright and allow an explicit host allow-list
+# (INFRADOCS_AI_ALLOWED_HOSTS) to lock the endpoint down further when desired.
+_AI_BLOCKED_HOSTS = frozenset({
+    "169.254.169.254",          # AWS/GCP/Azure/OCI IMDS
+    "metadata", "metadata.google.internal", "metadata.goog",
+    "fd00:ec2::254",            # AWS IMDS over IPv6
+})
+
+
+def _endpoint_allowed(url: str) -> bool:
+    p = urlparse(url)
+    if p.scheme not in ("http", "https"):
+        return False
+    host = (p.hostname or "").lower()
+    if not host:
+        return False
+    allow = os.environ.get("INFRADOCS_AI_ALLOWED_HOSTS", "").strip()
+    if allow:
+        allowed = {h.strip().lower() for h in allow.split(",") if h.strip()}
+        return host in allowed
+    return host not in _AI_BLOCKED_HOSTS
 
 
 def config(db) -> dict:
@@ -32,6 +58,10 @@ def chat(db, system: str, user: str, timeout: int = 45, json_mode: bool = True) 
     if not cfg["endpoint"]:
         return None
     url = cfg["endpoint"].rstrip("/") + "/chat/completions"
+    if not _endpoint_allowed(url):
+        # Refuse a metadata-service / disallowed target — never turn the server into
+        # an SSRF proxy just because the AI endpoint was (mis)configured to point there.
+        return None
     body = {
         "model": cfg["model"],
         "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],

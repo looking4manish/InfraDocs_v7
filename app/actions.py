@@ -111,6 +111,58 @@ def _load_self_protect_prefixes():
 SELF_PROTECT_PREFIXES = _load_self_protect_prefixes()
 
 
+# --------------------- argv-safety for ingested/scanned metadata ------------
+# Asset metadata (compose file_path, unit name, volume name, mountpoint, image ref)
+# ends up as a subprocess argv token. Under federation these fields can originate
+# from a secondary's /ingest payload — attacker-influencable — so validate before
+# they ever reach execve: reject values that would be parsed as an option flag
+# (leading '-'), or that carry argv/shell-breaking control characters.
+_COMPOSE_NAMES = frozenset({
+    "docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml",
+})
+
+
+def _reject_optlike(value: Any, field: str) -> str:
+    if not value or not isinstance(value, str):
+        raise ActionError(f"{field} is missing or not a string")
+    if value.startswith("-"):
+        raise ActionError(f"{field} '{value}' looks like a command-line option — refused")
+    if any(c in value for c in ("\x00", "\n", "\r")):
+        raise ActionError(f"{field} contains control characters — refused")
+    return value
+
+
+def _allowed_compose_roots() -> List[str]:
+    """The discovery roots a compose file is allowed to live under (realpath'd).
+    Derived from config so it tracks the deployment, not a hard-coded literal."""
+    from app.core.config_loader import get_config
+    cfg = get_config()
+    roots: List[str] = []
+    if cfg.paths.projects_root:
+        roots.append(cfg.paths.projects_root)
+    roots += list(cfg.paths.direct_roots or [])
+    roots += list(cfg.paths.scan_roots or [])
+    return [os.path.realpath(r) for r in roots if r]
+
+
+def _validate_compose_file(file_path: str) -> str:
+    """A compose -f target must be an absolute path, carry a recognized compose
+    basename, contain no traversal, and resolve under a configured discovery root."""
+    _reject_optlike(file_path, "compose file_path")
+    if not os.path.isabs(file_path):
+        raise ActionError(f"compose file_path must be absolute: {file_path}")
+    base = os.path.basename(file_path)
+    if base not in _COMPOSE_NAMES:
+        raise ActionError(f"refusing compose file with unexpected name: {base}")
+    real = os.path.realpath(file_path)
+    roots = _allowed_compose_roots()
+    if roots and not any(real == r or real.startswith(r.rstrip("/") + "/") for r in roots):
+        raise ActionError(
+            f"compose file_path is outside the configured discovery roots: {file_path}"
+        )
+    return file_path
+
+
 class ActionError(Exception):
     pass
 
@@ -263,6 +315,7 @@ def _act_docker_compose(
     file_path = asset.get("metadata", {}).get("file_path")
     if not file_path:
         raise ActionError("compose file path missing")
+    file_path = _validate_compose_file(file_path)
 
     # update = pull newer images, then recreate onto them. This is the real
     # "upgrade this app": `recreate` alone reuses the local image and never pulls.
@@ -293,7 +346,7 @@ def _act_docker_compose(
 def _act_systemd(
     asset: Dict[str, Any], action: str, args: Dict[str, Any]
 ) -> ActionResult:
-    name = asset["name"]
+    name = _reject_optlike(asset.get("name"), "unit name")
     if any(name.startswith(p) for p in SELF_PROTECT_PREFIXES):
         raise SelfActionRefused(f"refusing to act on protected unit: {name}")
 
@@ -347,8 +400,7 @@ def _act_docker_image(
     client = _docker_client()
     if action == "pull":
         ref = (asset.get("metadata", {}).get("tags") or [asset.get("name")])[0]
-        if not ref:
-            raise ActionError("image reference missing")
+        ref = _reject_optlike(ref, "image ref")
         try:
             client.images.pull(ref)
         except (APIError, DockerException) as e:
@@ -400,7 +452,7 @@ def _run_subprocess(
 
 
 def _act_docker_volume(asset, action, args):
-    name = asset["name"]
+    name = _reject_optlike(asset.get("name"), "volume name")
     if action == "inspect":
         return _run_subprocess(["docker", "volume", "inspect", name], timeout=15, allow_nonzero=True)
     if action == "prune":
@@ -410,7 +462,7 @@ def _act_docker_volume(asset, action, args):
 
 def _act_storage_mount(asset, action, args):
     if action == "inspect":
-        mp = asset.get("metadata", {}).get("mountpoint") or asset["name"]
+        mp = _reject_optlike(asset.get("metadata", {}).get("mountpoint") or asset.get("name"), "mountpoint")
         return _run_subprocess(["findmnt", "-T", mp, "--output", "TARGET,SOURCE,FSTYPE,SIZE,USED,AVAIL,USE%"], timeout=10, allow_nonzero=True)
     raise ActionNotAllowed(action)
 
