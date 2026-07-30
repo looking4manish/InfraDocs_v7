@@ -11,7 +11,6 @@ when neither a direct read nor sudo can parse the cert.
 
 from __future__ import annotations
 
-import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -22,15 +21,6 @@ from app.scanners.base import BaseScanner
 LE_LIVE = "/etc/letsencrypt/live"
 
 
-def _run(cmd: List[str], timeout: int = 10):
-    try:
-        return subprocess.run(
-            cmd, capture_output=True, text=True, timeout=timeout, check=False
-        )
-    except Exception:
-        return None
-
-
 class CertScanner(BaseScanner):
     @property
     def scanner_name(self) -> str:
@@ -39,9 +29,13 @@ class CertScanner(BaseScanner):
     def scan(self) -> List[Dict[str, Any]]:
         assets: List[Dict[str, Any]] = []
         for lineage in self._lineages():
-            cert_path = f"{LE_LIVE}/{lineage}/fullchain.pem"
-            info = self._read_cert(cert_path)
-            assets.append(self._make_asset(lineage, cert_path, info))
+            # Per-lineage guard: one unreadable/odd lineage must not drop the rest.
+            try:
+                cert_path = f"{LE_LIVE}/{lineage}/fullchain.pem"
+                info = self._read_cert(cert_path)
+                assets.append(self._make_asset(lineage, cert_path, info))
+            except Exception as e:  # noqa: BLE001
+                self.add_error(f"cert {lineage}: {e}")
         return assets
 
     def _lineages(self) -> List[str]:
@@ -57,9 +51,9 @@ class CertScanner(BaseScanner):
                     out.append(name)
             if out:
                 return out
-        r = _run(["ls", "-1", LE_LIVE])
+        r = self.run_cmd(["ls", "-1", LE_LIVE])
         if not r or r.returncode != 0:
-            r = _run(["sudo", "-n", "ls", "-1", LE_LIVE])
+            r = self.run_cmd(["sudo", "-n", "ls", "-1", LE_LIVE])
         if not r or r.returncode != 0:
             self.add_error(f"cannot list {LE_LIVE} (no read perms / sudo)")
             return []
@@ -79,12 +73,12 @@ class CertScanner(BaseScanner):
             "-enddate", "-startdate", "-issuer", "-subject",
             "-ext", "subjectAltName",
         ]
-        r = _run(args)
+        r = self.run_cmd(args)
         if not r or r.returncode != 0:
             # sudo fallback reads the REAL path (native root-only cert, no /host).
-            r = _run(["sudo", "-n", "openssl", "x509", "-in", path, "-noout",
-                      "-enddate", "-startdate", "-issuer", "-subject",
-                      "-ext", "subjectAltName"])
+            r = self.run_cmd(["sudo", "-n", "openssl", "x509", "-in", path, "-noout",
+                              "-enddate", "-startdate", "-issuer", "-subject",
+                              "-ext", "subjectAltName"])
         if not r or r.returncode != 0:
             return {}
         return self._parse_openssl(r.stdout)

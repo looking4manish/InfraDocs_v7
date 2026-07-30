@@ -1,7 +1,6 @@
 """Systemd scanner — services and timers."""
 
 import re
-import subprocess
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -90,17 +89,15 @@ class SystemdScanner(BaseScanner):
         """Register the shallowest app dir per install area so all of an app's services
         attribute to one project. Reserved/system dirs are dropped by the detector."""
         names = set(self._list_unit_file_names("service"))
-        try:
-            r = subprocess.run(
-                ["systemctl", "list-units", "--type=service", "--all", "--no-pager", "--plain"],
-                capture_output=True, text=True, timeout=15, check=False,
-            )
+        r = self.run_cmd(  # best-effort here — no label, silent on failure
+            ["systemctl", "list-units", "--type=service", "--all", "--no-pager", "--plain"],
+            timeout=15,
+        )
+        if r is not None:
             for line in r.stdout.splitlines():
                 parts = line.split(None, 4)
                 if parts and parts[0].endswith(".service"):
                     names.add(parts[0])
-        except Exception:  # noqa: BLE001 — list-units is best-effort here
-            pass
         # Only PROMOTABLE dirs are candidates — filter first so a reserved dir (e.g. a
         # service with WorkingDirectory=/) can't count as everyone's ancestor and drop
         # every real candidate in the shallowest-wins reduce below.
@@ -128,18 +125,13 @@ class SystemdScanner(BaseScanner):
         seen: set = set()
 
         # Pass A — loaded units (runtime state comes inline from list-units).
-        try:
-            result = subprocess.run(
-                [
-                    "systemctl", "list-units", f"--type={unit_type}",
-                    "--all", "--no-pager", "--plain",
-                ],
-                capture_output=True, text=True, timeout=15, check=False,
-            )
-        except Exception as e:
-            self.add_error(f"systemctl list-units {unit_type} failed: {e}")
-            result = None
-
+        result = self.run_cmd(
+            [
+                "systemctl", "list-units", f"--type={unit_type}",
+                "--all", "--no-pager", "--plain",
+            ],
+            timeout=15, label=f"systemctl list-units {unit_type}",
+        )
         if result is not None:
             for line in result.stdout.splitlines():
                 parts = line.split(None, 4)
@@ -149,10 +141,15 @@ class SystemdScanner(BaseScanner):
                 if not unit_name.endswith(f".{unit_type}"):
                     continue
                 seen.add(unit_name)
-                assets.append(self._build_unit_asset(
-                    unit_type, category, unit_name,
-                    load_state=parts[1], active_state=parts[2], sub_state=parts[3],
-                ))
+                # Per-unit guard: a single malformed unit must not sink the whole
+                # scan (it would lose every other unit as partial results).
+                try:
+                    assets.append(self._build_unit_asset(
+                        unit_type, category, unit_name,
+                        load_state=parts[1], active_state=parts[2], sub_state=parts[3],
+                    ))
+                except Exception as e:  # noqa: BLE001
+                    self.add_error(f"unit {unit_name}: {e}")
 
         # Pass B — installed-but-unloaded units (disabled/stopped drop out of
         # list-units). Pull their real state from `systemctl show` so they don't
@@ -160,27 +157,28 @@ class SystemdScanner(BaseScanner):
         for unit_name in self._list_unit_file_names(unit_type):
             if unit_name in seen:
                 continue
-            show = self._systemctl_show(unit_name)
-            assets.append(self._build_unit_asset(
-                unit_type, category, unit_name,
-                load_state=show.get("LoadState", "loaded"),
-                active_state=show.get("ActiveState", "inactive"),
-                sub_state=show.get("SubState", "dead"),
-                show=show,
-            ))
+            try:
+                show = self._systemctl_show(unit_name)
+                assets.append(self._build_unit_asset(
+                    unit_type, category, unit_name,
+                    load_state=show.get("LoadState", "loaded"),
+                    active_state=show.get("ActiveState", "inactive"),
+                    sub_state=show.get("SubState", "dead"),
+                    show=show,
+                ))
+            except Exception as e:  # noqa: BLE001
+                self.add_error(f"unit {unit_name}: {e}")
         return assets
 
     def _list_unit_file_names(self, unit_type: str) -> List[str]:
-        try:
-            r = subprocess.run(
-                [
-                    "systemctl", "list-unit-files", f"--type={unit_type}",
-                    "--no-pager", "--plain",
-                ],
-                capture_output=True, text=True, timeout=15, check=False,
-            )
-        except Exception as e:
-            self.add_error(f"systemctl list-unit-files {unit_type} failed: {e}")
+        r = self.run_cmd(
+            [
+                "systemctl", "list-unit-files", f"--type={unit_type}",
+                "--no-pager", "--plain",
+            ],
+            timeout=15, label=f"systemctl list-unit-files {unit_type}",
+        )
+        if r is None:
             return []
         names = []
         for line in r.stdout.splitlines():
@@ -259,35 +257,17 @@ class SystemdScanner(BaseScanner):
         cache = getattr(self, "_show_cache", None)
         if cache is not None and unit_name in cache:
             return cache[unit_name]
-        try:
-            result = subprocess.run(
-                [
-                    "systemctl",
-                    "show",
-                    "-p",
-                    ",".join(SYSTEMD_SHOW_PROPS),
-                    unit_name,
-                ],
-                capture_output=True,
-                text=True,
-                timeout=5,
-                check=False,
-            )
-            parsed = _parse_show_output(result.stdout)
-        except Exception:
-            parsed = {}
+        result = self.run_cmd(
+            ["systemctl", "show", "-p", ",".join(SYSTEMD_SHOW_PROPS), unit_name],
+            timeout=5,
+        )
+        parsed = _parse_show_output(result.stdout) if result is not None else {}
         if cache is not None:
             cache[unit_name] = parsed
         return parsed
 
     def _is_enabled(self, unit_name: str) -> bool:
-        try:
-            result = subprocess.run(
-                ["systemctl", "is-enabled", "--quiet", unit_name],
-                capture_output=True,
-                timeout=5,
-                check=False,
-            )
-            return result.returncode == 0
-        except Exception:
-            return False
+        result = self.run_cmd(
+            ["systemctl", "is-enabled", "--quiet", unit_name], timeout=5, text=False,
+        )
+        return result is not None and result.returncode == 0

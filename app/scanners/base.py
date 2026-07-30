@@ -6,9 +6,10 @@ base init. Mongo writes are owned by the orchestrator, not scanners.
 """
 
 import logging
+import subprocess
 from abc import ABC, abstractmethod
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence
 
 from app.core.project_detector import ProjectDetector
 
@@ -90,6 +91,28 @@ class BaseScanner(ABC):
         if relationships:
             asset["relationships"] = relationships
         return asset
+
+    def run_cmd(
+        self,
+        cmd: Sequence[str],
+        *,
+        timeout: int = 10,
+        text: bool = True,
+        label: Optional[str] = None,
+    ) -> Optional[subprocess.CompletedProcess]:
+        """Run a subprocess safely and uniformly. Returns the CompletedProcess, or
+        None on ANY failure (missing binary, timeout, OSError). `check=False` — the
+        caller inspects `returncode`. When `label` is given, a failure is recorded
+        via add_error (so it surfaces as partial_success); without a label the
+        failure is silent (e.g. an optional tool that simply isn't installed)."""
+        try:
+            return subprocess.run(
+                list(cmd), capture_output=True, text=text, timeout=timeout, check=False
+            )
+        except Exception as e:  # noqa: BLE001 — one place that must never raise
+            if label:
+                self.add_error(f"{label}: {e}")
+            return None
 
     def add_error(self, message: str):
         self.errors.append(

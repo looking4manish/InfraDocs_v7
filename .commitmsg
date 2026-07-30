@@ -1,28 +1,24 @@
-P2.10: unify host-path mapping onto core/hostpath; route nginx/certs/cron through it
+P2.11: shared subprocess runner on BaseScanner + per-item guards
 
-Three parallel host-path implementations had drifted apart. Consolidated onto
-app.core.hostpath as the single source of truth:
+Every scanner rolled its own `subprocess.run(..., capture_output=True,
+text=True, timeout=.., check=False)` wrapped in an ad-hoc try/except, with
+inconsistent error handling. Added BaseScanner.run_cmd() as the one safe
+runner: returns the CompletedProcess or None on any failure (missing binary /
+timeout / OSError), and records an error only when given a `label` (so an
+optional-tool-absent stays silent while a real failure surfaces as
+partial_success).
 
-- hostpath.to_real() is now the canonical REAL-path mapper (public), and
-  handles the HOST_ROOT-itself -> "/" case. _to_real kept as an internal alias.
-- project_detector reads HOST_ROOT from hostpath (one env read) and its Path
-  _to_real() delegates to hostpath.to_real() — same semantics, no drift. The
-  name is still exported for compose.py.
-- storage.py imports HOST_ROOT from hostpath instead of re-reading the env.
+- systemd: all five subprocess sites now go through run_cmd; labelled the
+  list-units/list-unit-files calls, left show/is-enabled silent (best-effort).
+- certs: dropped the local _run helper for run_cmd; sudo fallbacks unchanged.
 
-The nginx/certs/cron scanners previously read /etc/nginx, /etc/letsencrypt and
-/etc/cron* DIRECTLY, so in a container (/:/host:ro) they saw the container's
-own empty /etc, not the host's. Routed each through hostpath so a dockerized
-scan reads the real host configs via /host and reports REAL host paths:
+Per-item resilience: a single malformed systemd unit or cert lineage used to
+abort the whole scanner (losing every other asset as the exception bubbled to
+execute()). Both build loops now wrap each item in try/except -> add_error +
+continue, so one bad item degrades to partial_success instead of zero assets.
 
-- nginx: scans hostpath.host_glob() of sites-enabled/conf.d; presence of config
-  files (not a local nginx binary) gates the scan; certs read via to_read_path.
-- certs: lineage listing + cert reads go through the /host mount, with the
-  native ls/openssl + sudo -n fallback preserved for root-only native installs.
-- cron: /etc/crontab, /etc/cron.d, spool, and periodic dirs read via
-  read_host_configs/host_glob; periodic-dir commands report the real host path.
-
-Native behavior (HOST_ROOT unset) is unchanged: host_glob/to_read_path are
-no-ops, so all mapping collapses to the original direct reads.
+cron's `crontab -l` keeps its bespoke not-installed-vs-crashed handling
+(run_cmd cannot express that distinction); its file reads already route through
+hostpath (P2.10).
 
 Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
