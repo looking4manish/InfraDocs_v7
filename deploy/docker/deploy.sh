@@ -37,9 +37,23 @@ fi
 if docker info >/dev/null 2>&1; then DC=(docker compose); else DC=(sudo docker compose); fi
 "${DC[@]}" version >/dev/null 2>&1 || { echo "docker compose plugin missing"; exit 1; }
 
+# Random URL-safe secret (hex -> no characters that need escaping in a Mongo URI).
+gen_secret() { openssl rand -hex 24 2>/dev/null || head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n'; }
+
 # --- 2. Minimal .env (the rest is configured in the web wizard) ----------
 if [[ -f .env ]]; then
   say ".env exists - reusing it. (Delete deploy/docker/.env to reconfigure.)"
+  # Backfill Mongo credentials on an .env from before auth was enabled, so the
+  # container can start. NOTE: an EXISTING mongo_data volume has no users, so
+  # enabling --auth against it will lock the API out — the volume must be recreated
+  # (docker compose down -v; the scan catalog re-populates on next scan). Fresh
+  # deploys are unaffected.
+  if ! grep -q '^MONGO_PASSWORD=' .env; then
+    grep -q '^MONGO_USER=' .env || printf 'MONGO_USER=infradocs\n' >> .env
+    printf 'MONGO_PASSWORD=%s\n' "$(gen_secret)" >> .env
+    warn "Added MONGO_PASSWORD to .env (auth is now enforced). If Mongo already had"
+    warn "data, recreate its volume:  ${DC[*]} --env-file .env down -v   (scan re-populates)"
+  fi
 elif [[ -n "$NONINT" ]]; then
   echo "No deploy/docker/.env present (non-interactive). install.sh should write it first."; exit 1
 else
@@ -51,6 +65,8 @@ else
     printf 'SERVER_NAME=%s\n'    "$SERVER_ID"
     printf 'ADMIN_USER=admin\n'
     printf 'ADMIN_PASSWORD=Changeme001\n'
+    printf 'MONGO_USER=infradocs\n'
+    printf 'MONGO_PASSWORD=%s\n' "$(gen_secret)"
     printf 'PROJECTS_ROOT=%s\n'  "$PROJECTS_ROOT"
     printf 'DOMAIN=:8081\n'      # Caddy (host net) listens here; must match WEB_PORT
     printf 'COMPOSE_PROFILES=\n'
