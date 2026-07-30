@@ -7,8 +7,8 @@ and return without caring which subsystem was touched.
 
 Safety rails in this module:
   - allow-list per asset category (unknown action → ActionNotAllowed)
-  - explicit refusal to act on `infradocs-v6-*` so the API can't kill
-    itself mid-request
+  - explicit refusal to act on our own deployment (see SELF_PROTECT_PREFIXES)
+    so the API can't kill itself mid-request
   - logs() is capped at 1000 lines
 
 Everything else (sudo permissions, container ownership) is enforced by
@@ -17,6 +17,7 @@ the OS. The dispatcher just runs the command and reports stdout/stderr.
 
 from __future__ import annotations
 
+import os
 import shlex
 import subprocess
 import time
@@ -88,8 +89,26 @@ DESTRUCTIVE_ACTIONS: Dict[str, set] = {
     cat: set(spec.get("destructive", set())) for cat, spec in ACTION_REGISTRY.items()
 }
 
-# Refuse to act on these — would kill the API mid-request.
-SELF_PROTECT_PREFIXES = ("infradocs-v6-",)
+# Refuse to act on our own containers/units — an action here would kill the API
+# mid-request. This MUST match the real deployment naming, not a stale literal:
+#   docker product : infradocs-api-1 / infradocs-web-1 / infradocs-mongo-1
+#                     (compose project "infradocs")  → all start with "infradocs"
+#   legacy native  : infradocs-v6-api.service        → also starts with "infradocs"
+# Derived, not hard-coded: honour the compose project name and an explicit env
+# override so a differently-named deployment still self-protects correctly.
+_DEFAULT_SELF_PROTECT = ("infradocs",)
+
+
+def _load_self_protect_prefixes():
+    env = os.environ.get("INFRADOCS_SELF_PROTECT_PREFIXES", "")
+    prefixes = [p.strip() for p in env.split(",") if p.strip()]
+    project = os.environ.get("COMPOSE_PROJECT_NAME", "").strip()
+    if project and project not in prefixes:
+        prefixes.append(project)
+    return tuple(prefixes) or _DEFAULT_SELF_PROTECT
+
+
+SELF_PROTECT_PREFIXES = _load_self_protect_prefixes()
 
 
 class ActionError(Exception):
