@@ -47,3 +47,6 @@ frontend/dist/
 *.bak.storfix
 *.bak.docker
 deploy/docker/.env
+
+# local commit-message scratch file (never part of the tree)
+.commitmsg
