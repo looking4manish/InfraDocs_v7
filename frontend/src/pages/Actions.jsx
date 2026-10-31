@@ -1,184 +1,70 @@
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
+import { History, Search, CircleCheck, CircleX, CircleSlash } from "lucide-react";
 import { endpoints } from "../api/client";
-import StatePill from "../components/StatePill";
+import { shortDateTime } from "../lib/format";
+import { Page, Head, Card, Seg, SearchBox, Empty, Skel, Chip, Modal } from "../components/ui";
 
 export default function Actions() {
-  const [actor, setActor] = useState("");
-  const [action, setAction] = useState("");
-  const [assetId, setAssetId] = useState("");
-  const [limit, setLimit] = useState(50);
+  const [status, setStatus] = useState("all");
+  const [q, setQ] = useState("");
   const [open, setOpen] = useState(null);
-
-  const allowed = useQuery({
-    queryKey: ["actions-allowed"],
-    queryFn: () => endpoints.allowedActions().then((r) => r.data),
-  });
   const list = useQuery({
-    queryKey: ["actions-list", { actor, action, assetId, limit }],
-    queryFn: () =>
-      endpoints
-        .listActions({
-          actor: actor || undefined,
-          action: action || undefined,
-          asset_id: assetId || undefined,
-          limit,
-        })
-        .then((r) => r.data),
-    refetchInterval: 5000,
+    queryKey: ["actions-list", 300],
+    queryFn: () => endpoints.listActions({ limit: 300 }).then((r) => r.data.actions || []),
+    refetchInterval: 10000,
   });
-
-  const allActions = Object.values(allowed.data?.allowed || {}).flat();
-  const uniqueActions = Array.from(new Set(allActions)).sort();
+  const rows = (list.data || []);
+  const ql = q.trim().toLowerCase();
+  const shown = rows
+    .filter((r) => status === "all" || (status === "failed" ? r.status !== "success" : r.status === "success"))
+    .filter((r) => !ql || [r.action, r.asset_name, r.project, r.actor, r.category].some((x) => (x || "").toLowerCase().includes(ql)));
+  const failed = rows.filter((r) => r.status !== "success").length;
 
   return (
-    <div>
-      <div className="mb-4">
-        <h1 className="text-xl font-semibold">Actions log</h1>
-        <p className="text-xs text-slate-500 mt-0.5">
-          Every operational action attempt — success, failed, refused — is
-          recorded here with actor, asset, status, return code, and trimmed
-          stdout/stderr. Polls every 5s.
-        </p>
+    <Page>
+      <Head eyebrow="Audit" title="Audit log" sub="Every action, who ran it and what it returned" />
+      <div className="toolbar">
+        <Seg value={status} onChange={setStatus} options={[
+          { value: "all", label: "All", count: rows.length },
+          { value: "success", label: "Succeeded", count: rows.length - failed },
+          { value: "failed", label: "Failed or refused", count: failed },
+        ]} />
+        <SearchBox icon={Search} value={q} onChange={setQ} placeholder="Filter by action, target, project or user" />
       </div>
-
-      <div className="neon-panel rounded-lg p-3 mb-3">
-        <div className="flex flex-wrap gap-3 items-end">
-          <div>
-            <label className="text-[10px] uppercase tracking-wide text-slate-500 block mb-1">
-              action
-            </label>
-            <select
-              value={action}
-              onChange={(e) => setAction(e.target.value)}
-              className="bg-bg-base border border-bg-hover rounded px-2 py-1 text-xs"
-            >
-              <option value="">all</option>
-              {uniqueActions.map((a) => (
-                <option key={a} value={a}>
-                  {a}
-                </option>
-              ))}
-            </select>
+      <Card className="log">
+        <div className="tr th"><span /><span>When</span><span>Target</span><span>Project</span><span>Action</span><span>By</span><span>Result</span></div>
+        {list.isLoading && <div style={{ padding: 20 }}><Skel h={240} /></div>}
+        {!list.isLoading && shown.length === 0 && <Empty icon={History} title={rows.length ? "Nothing matches" : "No actions yet"}>{rows.length ? "Change the filter or the search text." : "Starts, stops, restarts and teardowns are recorded here."}</Empty>}
+        {shown.map((r, i) => {
+          const ok = r.status === "success";
+          const refused = r.status === "refused";
+          return (
+            <div key={i} className="tr" role="button" tabIndex={0} onClick={() => setOpen(r)} onKeyDown={(e) => { if (e.key === "Enter") setOpen(r); }}>
+              <span>{ok ? <CircleCheck size={15} color="var(--hi)" /> : refused ? <CircleSlash size={15} color="var(--warn)" /> : <CircleX size={15} color="var(--danger)" />}</span>
+              <span className="when">{shortDateTime(r.timestamp)}</span>
+              <span className="nm" title={r.asset_name}>{r.asset_name || "—"}</span>
+              <span className="pj">{r.project || "—"}</span>
+              <span className="mono" style={{ fontSize: 12.5 }}>{r.action}</span>
+              <span className="pj">{r.actor || "—"}</span>
+              <span><Chip tone={ok ? "ok" : refused ? "warn" : "danger"}>{r.status}</Chip></span>
+            </div>
+          );
+        })}
+      </Card>
+      {open && (
+        <Modal wide title={`${open.action} · ${open.asset_name || open.project || ""}`} icon={History} onClose={() => setOpen(null)}>
+          <div className="kv" style={{ gridTemplateColumns: "120px minmax(0,1fr)" }}>
+            <span className="k">When</span><span className="v mono">{shortDateTime(open.timestamp)}</span>
+            <span className="k">By</span><span className="v">{open.actor || "—"}</span>
+            <span className="k">Category</span><span className="v mono">{open.category || "—"}</span>
+            <span className="k">Result</span><span className="v">{open.status}{open.return_code != null ? ` · exit ${open.return_code}` : ""}{open.duration_ms != null ? ` · ${open.duration_ms} ms` : ""}</span>
+            {open.refused_reason && <><span className="k">Refused</span><span className="v">{open.refused_reason}</span></>}
           </div>
-          <div>
-            <label className="text-[10px] uppercase tracking-wide text-slate-500 block mb-1">
-              actor
-            </label>
-            <input
-              value={actor}
-              onChange={(e) => setActor(e.target.value)}
-              placeholder="username"
-              className="bg-bg-base border border-bg-hover rounded px-2 py-1 text-xs w-32"
-            />
-          </div>
-          <div className="flex-1 min-w-[200px]">
-            <label className="text-[10px] uppercase tracking-wide text-slate-500 block mb-1">
-              asset_id
-            </label>
-            <input
-              value={assetId}
-              onChange={(e) => setAssetId(e.target.value)}
-              placeholder="oci:container:..."
-              className="bg-bg-base border border-bg-hover rounded px-2 py-1 text-xs w-full font-mono"
-            />
-          </div>
-          <div>
-            <label className="text-[10px] uppercase tracking-wide text-slate-500 block mb-1">
-              limit
-            </label>
-            <select
-              value={limit}
-              onChange={(e) => setLimit(Number(e.target.value))}
-              className="bg-bg-base border border-bg-hover rounded px-2 py-1 text-xs"
-            >
-              {[25, 50, 100, 250].map((n) => (
-                <option key={n} value={n}>
-                  {n}
-                </option>
-              ))}
-            </select>
-          </div>
-          <div className="ml-auto text-xs text-slate-500">
-            {list.data ? `${list.data.count} entries` : "—"}
-          </div>
-        </div>
-      </div>
-
-      <div className="neon-panel rounded-lg overflow-hidden">
-        <div className="grid grid-cols-12 gap-2 px-3 py-2 text-xs uppercase tracking-wide text-slate-500 border-b border-bg-hover">
-          <div className="col-span-2">When</div>
-          <div className="col-span-1">Actor</div>
-          <div className="col-span-1">Action</div>
-          <div className="col-span-3">Asset</div>
-          <div className="col-span-2">Category</div>
-          <div className="col-span-1">Status</div>
-          <div className="col-span-1 text-right">ms</div>
-          <div className="col-span-1">Refused</div>
-        </div>
-        {list.isLoading && (
-          <div className="p-4 text-sm text-slate-400">Loading…</div>
-        )}
-        {list.data?.actions?.map((a) => (
-          <div key={a._id}>
-            <button
-              onClick={() => setOpen(open === a._id ? null : a._id)}
-              className="w-full grid grid-cols-12 gap-2 px-3 py-2 border-b border-bg-card text-sm hover:bg-bg-hover/40 text-left items-center"
-            >
-              <div className="col-span-2 text-xs text-slate-400">
-                {new Date(a.timestamp).toLocaleString()}
-              </div>
-              <div className="col-span-1 text-xs text-slate-300">{a.actor}</div>
-              <div className="col-span-1 font-mono text-xs">{a.action}</div>
-              <div className="col-span-3 truncate text-xs text-slate-200" title={a.asset_id}>
-                {a.asset_name || a.asset_id}
-              </div>
-              <div className="col-span-2 text-xs text-slate-400 truncate">
-                {a.category}
-              </div>
-              <div className="col-span-1">
-                <StatePill value={a.status} />
-              </div>
-              <div className="col-span-1 text-right text-xs text-slate-500">
-                {a.duration_ms ?? "—"}
-              </div>
-              <div className="col-span-1 text-xs text-rose-300/80">
-                {a.refused_reason || ""}
-              </div>
-            </button>
-            {open === a._id && (
-              <div className="px-4 py-3 bg-bg-base/50 border-b border-bg-card space-y-2">
-                {a.stdout && (
-                  <details open>
-                    <summary className="text-[10px] uppercase tracking-wide text-slate-500 cursor-pointer">
-                      stdout ({a.stdout.length}b)
-                    </summary>
-                    <pre className="text-xs mt-1 whitespace-pre-wrap bg-bg-base border border-bg-hover rounded p-2 max-h-60 overflow-y-auto">
-                      {a.stdout}
-                    </pre>
-                  </details>
-                )}
-                {a.stderr && (
-                  <details open>
-                    <summary className="text-[10px] uppercase tracking-wide text-slate-500 cursor-pointer">
-                      stderr
-                    </summary>
-                    <pre className="text-xs mt-1 whitespace-pre-wrap bg-bg-base border border-rose-500/20 rounded p-2 text-rose-300 max-h-60 overflow-y-auto">
-                      {a.stderr}
-                    </pre>
-                  </details>
-                )}
-                <div className="text-[11px] text-slate-500 font-mono">
-                  {a.asset_id} · args: {JSON.stringify(a.args || {})}
-                </div>
-              </div>
-            )}
-          </div>
-        ))}
-        {list.data && list.data.count === 0 && (
-          <div className="p-4 text-sm text-slate-400">No actions yet.</div>
-        )}
-      </div>
-    </div>
+          {open.stdout && <pre className="out">{open.stdout}</pre>}
+          {open.stderr && <pre className="out err">{open.stderr}</pre>}
+        </Modal>
+      )}
+    </Page>
   );
 }

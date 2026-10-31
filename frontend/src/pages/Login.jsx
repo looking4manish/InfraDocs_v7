@@ -1,14 +1,15 @@
 import { useState } from "react";
+import { Layers, LogIn, KeyRound } from "lucide-react";
 import { endpoints, setToken } from "../api/client";
+import { errDetail } from "../lib/format";
 
-const wrap =
-  "min-h-screen flex items-center justify-center bg-[#0a0e14] text-zinc-100 p-6";
-const panel =
-  "neon-panel w-full max-w-sm rounded-2xl p-7 flex flex-col gap-4";
-const field =
-  "w-full rounded-lg bg-black/40 border border-white/10 px-3 py-2 text-sm outline-none focus:border-[var(--neon)] transition-colors";
-const btn =
-  "w-full rounded-lg py-2 text-sm font-medium neon-glow border border-[var(--neon)] bg-[var(--neon)]/10 hover:bg-[var(--neon)]/20 disabled:opacity-50 transition-colors";
+function Brand() {
+  return (
+    <div className="brand" style={{ fontSize: 19 }}>
+      <span className="brand-mark"><Layers size={17} /></span>InfraDocs
+    </div>
+  );
+}
 
 export function Login({ onLoggedIn }) {
   const [u, setU] = useState("");
@@ -25,36 +26,31 @@ export function Login({ onLoggedIn }) {
       setToken(data.token);
       onLoggedIn(data);
     } catch (e2) {
-      setErr(e2?.response?.data?.detail || "Login failed");
+      setErr(e2?.response?.status === 401 ? "Wrong username or password" : errDetail(e2, "Sign-in failed"));
     } finally {
       setBusy(false);
     }
   }
 
   return (
-    <div className={wrap}>
-      <form onSubmit={submit} className={panel}>
-        <div className="text-center">
-          <div className="text-xl font-semibold tracking-tight">InfraDocs</div>
-          <div className="text-xs text-zinc-400 mt-1">Sign in to continue</div>
+    <div className="auth">
+      <form onSubmit={submit} className="card">
+        <Brand />
+        <div>
+          <h1>Sign in</h1>
         </div>
-        <input
-          className={field}
-          placeholder="Username"
-          autoFocus
-          value={u}
-          onChange={(e) => setU(e.target.value)}
-        />
-        <input
-          className={field}
-          type="password"
-          placeholder="Password"
-          value={p}
-          onChange={(e) => setP(e.target.value)}
-        />
-        {err && <div className="text-rose-400 text-xs">{err}</div>}
-        <button className={btn} disabled={busy || !u || !p}>
-          {busy ? "Signing in…" : "Sign in"}
+        <div className="lead">Use the administrator account created during setup.</div>
+        <div className="field">
+          <label htmlFor="u">Username</label>
+          <input id="u" className="input" autoFocus autoComplete="username" value={u} onChange={(e) => setU(e.target.value)} />
+        </div>
+        <div className="field">
+          <label htmlFor="p">Password</label>
+          <input id="p" className="input" type="password" autoComplete="current-password" value={p} onChange={(e) => setP(e.target.value)} />
+        </div>
+        {err && <div className="formerr">{err}</div>}
+        <button type="submit" className="btn primary" style={{ height: 44, justifyContent: "center" }} disabled={busy || !u || !p}>
+          <LogIn size={16} />{busy ? "Signing in" : "Sign in"}
         </button>
       </form>
     </div>
@@ -70,48 +66,37 @@ export function ChangePassword({ onDone }) {
   async function submit(e) {
     e.preventDefault();
     setErr("");
-    if (p1.length < 8) return setErr("Use at least 8 characters");
-    if (p1 !== p2) return setErr("Passwords don't match");
+    if (p1.length < 12) return setErr("Use at least 12 characters");
+    if (p1 !== p2) return setErr("The passwords differ");
     setBusy(true);
     try {
       await endpoints.changePassword(p1);
       onDone();
     } catch (e2) {
-      setErr(e2?.response?.data?.detail || "Could not change password");
+      setErr(errDetail(e2, "Password not changed"));
     } finally {
       setBusy(false);
     }
   }
 
   return (
-    <div className={wrap}>
-      <form onSubmit={submit} className={panel}>
-        <div className="text-center">
-          <div className="text-xl font-semibold tracking-tight">
-            Set a new password
-          </div>
-          <div className="text-xs text-zinc-400 mt-1">
-            You're using the default password — please change it.
-          </div>
+    <div className="auth">
+      <form onSubmit={submit} className="card">
+        <Brand />
+        <h1>Set a new password</h1>
+        <div className="lead">This account still has its initial password.</div>
+        <div className="field">
+          <label htmlFor="p1">New password</label>
+          <input id="p1" className="input" type="password" autoFocus autoComplete="new-password" value={p1} onChange={(e) => setP1(e.target.value)} />
+          <div className="help">At least 12 characters.</div>
         </div>
-        <input
-          className={field}
-          type="password"
-          placeholder="New password (min 8 chars)"
-          autoFocus
-          value={p1}
-          onChange={(e) => setP1(e.target.value)}
-        />
-        <input
-          className={field}
-          type="password"
-          placeholder="Confirm new password"
-          value={p2}
-          onChange={(e) => setP2(e.target.value)}
-        />
-        {err && <div className="text-rose-400 text-xs">{err}</div>}
-        <button className={btn} disabled={busy || !p1 || !p2}>
-          {busy ? "Saving…" : "Save & continue"}
+        <div className="field">
+          <label htmlFor="p2">Repeat password</label>
+          <input id="p2" className="input" type="password" autoComplete="new-password" value={p2} onChange={(e) => setP2(e.target.value)} />
+        </div>
+        {err && <div className="formerr">{err}</div>}
+        <button type="submit" className="btn primary" style={{ height: 44, justifyContent: "center" }} disabled={busy || !p1 || !p2}>
+          <KeyRound size={16} />{busy ? "Saving" : "Save and continue"}
         </button>
       </form>
     </div>
