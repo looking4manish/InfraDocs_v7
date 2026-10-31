@@ -144,14 +144,24 @@ def _setup_open(db: DBManager) -> bool:
     return not _settings(db).get("setup_complete")
 
 
+_failures = {"n": 0, "until": 0.0}
+
+
 def _require_open_with_code(db: DBManager, code: Optional[str]) -> None:
+    import time
     if not _setup_open(db):
         raise HTTPException(status_code=409, detail="setup is already complete")
     expected = _setup_code()
     if not expected:
         raise HTTPException(status_code=403, detail="installer did not set a setup code")
-    if not code or not secrets.compare_digest(code.strip(), expected):
+    if time.monotonic() < _failures["until"]:
+        raise HTTPException(status_code=429, detail="too many wrong setup codes; wait 5 minutes")
+    if not code or not secrets.compare_digest(code.strip().upper(), expected.upper()):
+        _failures["n"] += 1
+        if _failures["n"] >= 10:
+            _failures["n"], _failures["until"] = 0, time.monotonic() + 300
         raise HTTPException(status_code=403, detail="setup code does not match")
+    _failures["n"] = 0
 
 
 def _web_port() -> int:

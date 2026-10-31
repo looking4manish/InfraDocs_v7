@@ -1,136 +1,168 @@
 #!/usr/bin/env bash
-# InfraDocs one-shot deploy. Run it on the server (SSH or Cockpit terminal):
-#   bash deploy/docker/deploy.sh
-# Installs Docker if needed, writes a minimal deploy/docker/.env, builds + starts
-# the stack, AND sets up a browser-reachable URL for the first-run wizard (where
-# you fill in everything else). Re-runnable. Defaults are fine for a first test.
+# InfraDocs installer. Run on the server, from the repository checkout.
+#
+#   First server:   bash deploy/docker/deploy.sh [--name oci] [--projects ~/projects]
+#   Later servers:  curl -fsSL http://<primary>:8081/join.sh | bash -s -- <join-code> [--name n150]
+#                   (join.sh clones the repository and runs this script with --join/--primary)
+#
+# Every step prints a tick or a cross with a named reason, and is logged with a timestamp to
+# deploy/docker/install.log. Re-running is safe: an existing .env is kept, including the
+# setup code, and the stack is rebuilt in place (the database volume is preserved).
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$HERE"
+LOG="$HERE/install.log"
 
-# Non-interactive mode (set by install.sh): reuse a pre-written .env, never prompt,
-# and skip the browser-exposure menu entirely (the operator already supplied the
-# reachable address — transport-agnostic, no Tailscale).
-NONINT="${INFRADOCS_NONINTERACTIVE:-}"
+ts()   { date -u +%Y-%m-%dT%H:%M:%SZ; }
+log()  { printf '%s %s\n' "$(ts)" "$*" >>"$LOG"; }
+step() { printf '\n\033[1;36m▸ %s\033[0m\n' "$1"; log "STEP $1"; }
+ok()   { printf '  \033[1;32m✓\033[0m %s\n' "$1"; log "OK   $1"; }
+warn() { printf '  \033[1;33m!\033[0m %s\n' "$1"; log "WARN $1"; }
+die()  { printf '  \033[1;31m✗ %s\033[0m\n' "$1" >&2; log "FAIL $1"; exit 1; }
 
-say()  { printf "\n\033[1;36m> %s\033[0m\n" "$1"; }
-warn() { printf "\033[1;33m! %s\033[0m\n" "$1"; }
-ask()  { local p="$1" d="$2" v; read -rp "$p [$d]: " v; printf '%s' "${v:-$d}"; }
+NAME=""; PROJECTS=""; PORT=""; JOIN=""; PRIMARY=""; ADDRESS=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --name)     NAME="${2:-}"; shift 2 ;;
+    --projects) PROJECTS="${2:-}"; shift 2 ;;
+    --port)     PORT="${2:-}"; shift 2 ;;
+    --join)     JOIN="${2:-}"; shift 2 ;;
+    --primary)  PRIMARY="${2:-}"; shift 2 ;;
+    --address)  ADDRESS="${2:-}"; shift 2 ;;
+    -h|--help)  sed -n '2,12p' "$0"; exit 0 ;;
+    *) die "unknown option $1 (see --help)" ;;
+  esac
+done
+[[ -n "$JOIN" && -z "$PRIMARY" ]] && die "--join needs --primary <url>"
+log "---- installer started (join=${JOIN:+yes}) ----"
 
-# --- 1. Docker -----------------------------------------------------------
-if ! command -v docker >/dev/null 2>&1; then
-  if [[ -n "$NONINT" ]]; then
-    echo "Docker is required but not installed (non-interactive). Install Docker, then retry."; exit 1
-  fi
-  warn "Docker is not installed."
-  read -rp "Install Docker now (needs sudo)? [Y/n]: " a
-  if [[ "${a:-Y}" =~ ^[Yy] ]]; then
-    curl -fsSL https://get.docker.com | sudo sh
-    sudo usermod -aG docker "$USER" || true
-    warn "Docker installed — if the build asks for sudo, the group isn't active"
-    warn "yet; log out/in afterwards to run docker without sudo."
+# ───────────── 1. preflight ─────────────
+step "Checking this server"
+[[ "$(uname -s)" == "Linux" ]] || die "Linux is required (found $(uname -s))"
+command -v curl >/dev/null || die "curl is required: sudo apt install -y curl"
+if ! command -v docker >/dev/null; then
+  if [[ -t 0 ]]; then
+    read -rp "  Docker is not installed. Install it now with sudo? [Y/n] " a
+    [[ "${a:-Y}" =~ ^[Yy] ]] || die "Docker is required"
+    curl -fsSL https://get.docker.com | sudo sh && sudo usermod -aG docker "$USER" || die "Docker install failed"
   else
-    echo "Docker is required. Aborting."; exit 1
+    die "Docker is required: curl -fsSL https://get.docker.com | sudo sh"
   fi
 fi
 if docker info >/dev/null 2>&1; then DC=(docker compose); else DC=(sudo docker compose); fi
-"${DC[@]}" version >/dev/null 2>&1 || { echo "docker compose plugin missing"; exit 1; }
+"${DC[@]}" version >/dev/null 2>&1 || die "the docker compose plugin is missing: sudo apt install -y docker-compose-plugin"
+ok "Docker $(docker version --format '{{.Server.Version}}' 2>/dev/null || sudo docker version --format '{{.Server.Version}}')"
+free_gb=$(df -Pk "$HERE" | awk 'NR==2{printf "%d", $4/1048576}')
+[[ "$free_gb" -ge 3 ]] || die "at least 3 GB free disk is needed (found ${free_gb} GB)"
+ok "${free_gb} GB free disk"
 
-# --- 2. Minimal .env (the rest is configured in the web wizard) ----------
+port_free() { ! (ss -ltnH 2>/dev/null | awk '{print $4}' | grep -qE "[:.]$1\$"); }
+pick_port() { local p="$1"; for _ in $(seq 0 40); do port_free "$p" && { echo "$p"; return; }; p=$((p+1)); done; echo ""; }
+
+# ───────────── 2. identity and addresses ─────────────
+step "Identifying this server"
 if [[ -f .env ]]; then
-  say ".env exists - reusing it. (Delete deploy/docker/.env to reconfigure.)"
-elif [[ -n "$NONINT" ]]; then
-  echo "No deploy/docker/.env present (non-interactive). install.sh should write it first."; exit 1
+  ok ".env exists — keeping it (delete deploy/docker/.env to start over)"
+  get() { grep -E "^$1=" .env | head -1 | cut -d= -f2-; }
+  NAME="$(get SERVER_ID)"; WEB_PORT="$(get WEB_PORT)"; API_PORT="$(get API_PORT)"
+  SETUP_CODE="$(get SETUP_CODE)"; TS_DNS="$(get TAILSCALE_DNS)"; TS_IP="$(get TAILSCALE_IP)"; PUB_IP="$(get PUBLIC_IP)"
 else
-  say "Minimal config - everything else is set in the web wizard after login."
-  SERVER_ID=$(ask "Server id (short, e.g. oci-p)" "$(hostname -s 2>/dev/null || echo infradocs)")
-  PROJECTS_ROOT=$(ask "Where your apps live (Projects root)" "$HOME/projects")
-  {
-    printf 'SERVER_ID=%s\n'      "$SERVER_ID"
-    printf 'SERVER_NAME=%s\n'    "$SERVER_ID"
-    printf 'ADMIN_USER=admin\n'
-    printf 'ADMIN_PASSWORD=Changeme001\n'
-    printf 'PROJECTS_ROOT=%s\n'  "$PROJECTS_ROOT"
-    printf 'DOMAIN=:8081\n'      # Caddy (host net) listens here; must match WEB_PORT
-    printf 'COMPOSE_PROFILES=\n'
-    printf 'CF_TUNNEL_TOKEN=\n'
-    printf 'TS_AUTHKEY=\n'
-    printf 'WEB_PORT=8081\n'
-    printf 'WEB_TLS_PORT=8443\n'
-    printf 'API_PORT=8090\n'
-    printf 'MONGO_PORT=27018\n'
-  } > .env
-  chmod 600 .env
-  say ".env written (mode 600)."
+  NAME="${NAME:-$(hostname -s | tr '[:upper:]' '[:lower:]')}"
+  [[ "$NAME" =~ ^[a-z0-9][a-z0-9-]{0,31}$ ]] || die "server name '$NAME': use lower-case letters, digits and hyphens (--name)"
+  PROJECTS="${PROJECTS:-$HOME/projects}"
+  [[ -d "$PROJECTS" ]] || warn "$PROJECTS does not exist yet — create it or pass --projects"
+  WEB_PORT="$(pick_port "${PORT:-8081}")"; [[ -n "$WEB_PORT" ]] || die "no free web port from ${PORT:-8081}"
+  API_PORT="$(pick_port 8090)";  [[ -n "$API_PORT" ]] || die "no free API port from 8090"
+  MONGO_PORT="$(pick_port 27018)"; [[ -n "$MONGO_PORT" ]] || die "no free MongoDB port from 27018"
+  TS_IP=""; TS_DNS=""
+  if command -v tailscale >/dev/null 2>&1; then
+    TS_IP="$(tailscale ip -4 2>/dev/null | head -1 || true)"
+    TS_DNS="$(tailscale status --json 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin).get("Self",{}).get("DNSName","").rstrip("."))' 2>/dev/null || true)"
+  fi
+  PUB_IP="$(curl -fsS --max-time 4 https://api.ipify.org 2>/dev/null || true)"
+  SETUP_CODE="$(head -c 64 /dev/urandom | base32 | tr -dc 'A-Z2-7' | head -c 8 | sed 's/^\(....\)/\1-/')"
+  SVC_PASS="$(head -c 24 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 24)"
+  umask 077
+  cat > .env <<EOF
+SERVER_ID=$NAME
+SERVER_NAME=$NAME
+PROJECTS_ROOT=$PROJECTS
+WEB_PORT=$WEB_PORT
+API_PORT=$API_PORT
+MONGO_PORT=$MONGO_PORT
+DOMAIN=:$WEB_PORT
+SETUP_CODE=$SETUP_CODE
+ADMIN_USER=service
+ADMIN_PASSWORD=$SVC_PASS
+TAILSCALE_IP=$TS_IP
+TAILSCALE_DNS=$TS_DNS
+PUBLIC_IP=$PUB_IP
+COMPOSE_PROFILES=
+CF_TUNNEL_TOKEN=
+TS_AUTHKEY=
+EOF
+  ok ".env written (mode 600)"
 fi
+ok "server name: $NAME"
+ok "web port $WEB_PORT · API port $API_PORT"
+[[ -n "$TS_DNS$TS_IP" ]] && ok "Tailscale: ${TS_DNS:-$TS_IP}" || warn "Tailscale not found — other servers must reach this one another way"
+[[ -n "$PUB_IP" ]] && ok "public address: $PUB_IP"
 
-# --- 3. Build + start ----------------------------------------------------
-say "Building + starting (first run pulls images + builds the UI - a few minutes)..."
-"${DC[@]}" --env-file .env up -d --build
-
-# --- 4. Wait for health --------------------------------------------------
-get() { grep -E "^$1=" .env | cut -d= -f2-; }
-API_PORT="$(get API_PORT)"; API_PORT="${API_PORT:-8090}"
-WEB_PORT="$(get WEB_PORT)"; WEB_PORT="${WEB_PORT:-8081}"
-say "Waiting for the API..."
-ok=""
-for _ in $(seq 1 40); do
-  [[ "$(curl -s -o /dev/null -w '%{http_code}' "http://localhost:${API_PORT}/api/health" || true)" == "200" ]] && { ok=1; break; }
+# ───────────── 3. build and start ─────────────
+step "Building and starting (the first build takes a few minutes)"
+if ! "${DC[@]}" --env-file .env up -d --build >>"$LOG" 2>&1; then
+  tail -20 "$LOG"
+  die "the build or start failed — the full output is in $LOG"
+fi
+ok "containers started"
+for i in $(seq 1 90); do
+  code="$(curl -s -o /dev/null -w '%{http_code}' "http://localhost:${API_PORT}/api/health" || true)"
+  [[ "$code" == "200" ]] && break
+  [[ "$i" == "90" ]] && { "${DC[@]}" --env-file .env logs --tail 30 api; die "the API did not become healthy in 3 minutes"; }
   sleep 2
 done
-"${DC[@]}" --env-file .env ps
-[[ -n "$ok" ]] && say "InfraDocs is up." || warn "API not ready - check: ${DC[*]} --env-file .env logs api"
+ok "API healthy"
+web="$(curl -s -o /dev/null -w '%{http_code}' "http://localhost:${WEB_PORT}/" || true)"
+[[ "$web" == "200" ]] && ok "web server answering on :$WEB_PORT" || die "web server on :$WEB_PORT answered $web"
 
-# --- 5. Make the wizard reachable from a browser ------------------------
-WIZ_URL=""
-if [[ -n "$NONINT" ]]; then
-  # install.sh drives onboarding over the terminal + the operator-supplied address;
-  # no browser-exposure step, no Tailscale. Report the local URL the installer probes.
-  WIZ_URL="${INFRADOCS_ADVERTISE_URL:-http://localhost:${WEB_PORT}}"
-  say "Non-interactive: stack is up. Onboarding handled by install.sh."
-  echo "Local URL: http://localhost:${WEB_PORT}  ·  reachable at: ${WIZ_URL}"
+HOST="${TS_DNS:-${TS_IP:-${PUB_IP:-localhost}}}"
+ADDRESS="${ADDRESS:-http://$HOST:$WEB_PORT}"
+
+# ───────────── 4a. later servers: join ─────────────
+if [[ -n "$JOIN" ]]; then
+  step "Joining the replica set at $PRIMARY"
+  body=$(printf '{"setup_code":"%s","primary_url":"%s","code":"%s","address":"%s","server_name":"%s"}' \
+         "$SETUP_CODE" "$PRIMARY" "$JOIN" "$ADDRESS" "$NAME")
+  resp="$(curl -s -w '\n%{http_code}' -X POST "http://localhost:${API_PORT}/api/setup/join" \
+          -H 'Content-Type: application/json' -d "$body" --max-time 60 || true)"
+  code="$(printf '%s' "$resp" | tail -1)"; out="$(printf '%s' "$resp" | sed '$d')"
+  log "join response $code $out"
+  if [[ "$code" != "200" ]]; then
+    reason="$(printf '%s' "$out" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("detail"))' 2>/dev/null || echo "$out")"
+    die "join refused: $reason"
+  fi
+  mode="$(printf '%s' "$out" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["mode"]+" — "+d["mode_reason"])' 2>/dev/null || true)"
+  ok "joined as $NAME at $ADDRESS"
+  ok "replica set mode: $mode"
+  printf '\n  Open the primary to see it: %s/servers\n\n' "$PRIMARY"
   exit 0
 fi
-say "How should you open the wizard in your browser?"
-echo "  1) Tailscale  (private URL on your tailnet - recommended, no domain/firewall)"
-echo "  2) Public IP  (open the port in your cloud firewall, browse the IP)"
-echo "  3) Skip       (I'll expose it myself)"
-HOW=$(ask "Choose 1-3" "1")
 
-case "$HOW" in
-  1)
-    if ! command -v tailscale >/dev/null 2>&1; then
-      warn "Tailscale isn't installed."
-      read -rp "Install it now? [Y/n]: " ti
-      [[ "${ti:-Y}" =~ ^[Yy] ]] && curl -fsSL https://tailscale.com/install.sh | sudo sh
-    fi
-    if command -v tailscale >/dev/null 2>&1; then
-      tailscale status >/dev/null 2>&1 || { warn "Logging this box into Tailscale (click the printed link):"; sudo tailscale up || true; }
-      if sudo tailscale serve --bg "$WEB_PORT" 2>/dev/null; then
-        WIZ_URL="$(tailscale serve status 2>/dev/null | grep -oE 'https://[^ ]+' | head -1)"
-      else
-        warn "tailscale serve failed - try: sudo tailscale up   then re-run this script."
-      fi
-    fi
-    ;;
-  2)
-    PUBIP="$(curl -s --max-time 4 https://api.ipify.org || hostname -I 2>/dev/null | awk '{print $1}')"
-    sudo ufw allow "${WEB_PORT}"/tcp 2>/dev/null || true
-    WIZ_URL="http://${PUBIP}:${WEB_PORT}"
-    warn "Also open TCP ${WEB_PORT} in your cloud firewall/security-list (OCI: a VCN ingress rule)."
-    ;;
-esac
-
+# ───────────── 4b. first server: hand over to the browser ─────────────
+setup_done="$(curl -s "http://localhost:${API_PORT}/api/setup/status" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("setup_complete"))' 2>/dev/null || echo False)"
+if [[ "$setup_done" == "True" ]]; then
+  ok "already set up — open $ADDRESS"
+  exit 0
+fi
 cat <<EOF
 
-====================================================================
- OPEN THE SETUP WIZARD
-====================================================================
- In any browser, go to:
-     ${WIZ_URL:-<run on the server: sudo tailscale serve --bg ${WEB_PORT} ; then: tailscale serve status>}
+  ┌──────────────────────────────────────────────────────────┐
+    Finish setup in your browser
 
- First login:  admin / Changeme001   -> set a new password -> fill in the wizard.
- Manage:       ${DC[*]} --env-file .env   ps | logs -f | down
-====================================================================
+    Open        $ADDRESS
+    Setup code  $SETUP_CODE
+  └──────────────────────────────────────────────────────────┘
+
 EOF
+log "waiting for browser setup at $ADDRESS"

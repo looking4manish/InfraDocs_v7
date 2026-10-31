@@ -1,5 +1,5 @@
 # InfraDocs — self-contained deployable stack: Mongo + API(+scanners) + Caddy web.
-# Deploy on any Ubuntu/Linux host: `cp .env.example .env`, edit, `docker compose up -d`.
+# Installed by deploy/docker/deploy.sh, which writes deploy/docker/.env.
 #
 # The API runs on the HOST network + PID namespace and mounts the host read-only so
 # its scanners see the real machine (proven: all 8 scanners match the host). It needs
@@ -35,6 +35,13 @@ services:
       INFRADOCS_PROJECTS_ROOT: "${PROJECTS_ROOT:-/home/youruser/projects}"
       # Extra roots to hunt for scattered projects (comma-separated); read via /host.
       INFRADOCS_SCAN_ROOTS: "${SCAN_ROOTS:-}"
+      # First-run setup and joining (written by deploy.sh).
+      INFRADOCS_SETUP_CODE: "${SETUP_CODE:-}"
+      INFRADOCS_WEB_PORT: "${WEB_PORT:-8081}"
+      INFRADOCS_TAILSCALE_IP: "${TAILSCALE_IP:-}"
+      INFRADOCS_TAILSCALE_DNS: "${TAILSCALE_DNS:-}"
+      INFRADOCS_PUBLIC_IP: "${PUBLIC_IP:-}"
+      INFRADOCS_REPO_URL: "${REPO_URL:-https://github.com/looking4manish/InfraDocs_v7.git}"
     volumes:
       - /:/host:ro                                  # real host disk (read-only) for storage
       - /var/run/docker.sock:/var/run/docker.sock   # docker scan + actions

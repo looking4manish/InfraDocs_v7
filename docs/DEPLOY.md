@@ -1,124 +1,65 @@
-# Deploy
+# Deploying InfraDocs
 
-There are two ways to deploy InfraDocs. The **Docker product** is the supported, generic,
-multi-server path. The **native systemd + nginx** scripts are how the original live instance
-(`infra.ocialwaysfree.site`) runs and are kept for that legacy box.
-
----
-
-## 1. Docker product (recommended)
-
-A self-contained docker-compose stack — MongoDB + API + Caddy web — driven by an interactive
-installer that ends at a browser-reachable setup wizard. Nothing host-specific is hardcoded;
-you choose how the UI is exposed during the wizard.
+## First server
 
 ```bash
-git clone https://github.com/looking4manish/InfraDocs_V6.git
-cd InfraDocs_V6/deploy/docker
-./deploy.sh
+git clone https://github.com/looking4manish/InfraDocs_v7.git ~/infradocs
+bash ~/infradocs/install.sh --name oci --projects ~/projects
 ```
 
-`deploy.sh` builds the images, starts the stack, and prints the wizard URL (it will use a
-Tailscale address or public IP when available, so you can reach it from a headless box over
-SSH/Cockpit). Then:
+`deploy/docker/deploy.sh` (which `install.sh` runs) does, with a tick or a named failure per
+step and a timestamped log in `deploy/docker/install.log`:
 
-1. Open the printed URL.
-2. Log in with the seeded `admin` / `Changeme001` (you're forced to change the password).
-3. Run the **setup wizard**: server name, role (standalone / primary / secondary), exposure
-   mechanism, and optional AI labeling (endpoint / key / model).
+1. Checks the server: Linux, curl, Docker and the compose plugin (offers to install Docker
+   when run in a terminal), at least 3 GB free disk.
+2. Writes `deploy/docker/.env` (mode 600) on the first run: server name, projects folder,
+   free web/API/MongoDB ports (from 8081 / 8090 / 27018), Tailscale address and public IP if
+   present, a random **setup code**, and a random service password. An existing `.env` is kept.
+3. Builds and starts `mongo` + `api` + `web`, then waits for the API and the web server.
+4. Prints the address to open and the setup code.
 
-Teardown is symmetric and clean:
+In the browser: enter the setup code, create the administrator, name the server, choose how it
+is reached (Tailscale, your domain, or a Cloudflare Tunnel; the address is checked by asking it
+for this server's identity), and finish. The server becomes a one-member replica set and the
+first scan starts.
+
+## More servers
+
+Servers → Add a server → choose **voting** or **non-voting** → copy the command and run it on
+the new server:
 
 ```bash
-./remove.sh
+curl -fsSL http://<primary>:8081/join.sh | bash -s -- <join-code> --name n150
 ```
 
-### What the stack looks like
+`join.sh` (served by the primary) clones the repository into `~/infradocs` and runs
+`deploy.sh --join <code> --primary <url>`. The installer starts the stack, then asks the
+primary to add this server; the primary connects back to verify the address. A private
+repository needs `INFRADOCS_REPO=git@github.com:looking4manish/InfraDocs_v7.git` in front of
+`bash`. Voting rules and failover: [`CLUSTER.md`](CLUSTER.md).
 
-- `deploy/docker/docker-compose.yml` — `mongo` + `api` + `web`.
+## What the stack looks like
+
+- `deploy/docker/docker-compose.yml`: `mongo` + `api` + `web`.
 - The **API container** runs with `network_mode: host` and `pid: host`, and mounts the host
-  filesystem **read-only at `/host`** (env `INFRADOCS_HOST_ROOT=/host`). That's what lets the
-  scanners see real containers, processes, listening ports, and config files. Inside the
-  container, read host configs through `app/core/hostpath.py`, never `/etc/...` directly.
-- The **web (Caddy) container** also runs on the host network and proxies to the API at
-  `localhost:<API_PORT>` (default `:8090`). It runs on the host network deliberately: the
-  OCI firewall drops docker-bridge → host traffic, so a bridged proxy couldn't reach the API.
-- Optional `cloudflared` and `tailscale` sidecars (compose profiles) provide exposure when
-  you don't have a public domain.
-- Configuration is driven by `deploy/docker/.env` (created by `deploy.sh`):
-  `INFRADOCS_SCAN_ROOTS`, ports, domain/exposure, etc.
+  filesystem read-only at `/host` (`INFRADOCS_HOST_ROOT=/host`), so the scanners see real
+  containers, processes, listening ports and config files. Read host configs through
+  `app/core/hostpath.py`, never `/etc/...` directly.
+- The **web (Caddy) container** runs on the host network and proxies `/api/*` and `/join.sh`
+  to the API at `localhost:<API_PORT>`. Host networking avoids the docker-bridge → host hop
+  that the OCI firewall drops.
+- Members reach each other on their web address (default port 8081). Over Tailscale no
+  firewall change is needed; over public IPs open the web port between the servers only.
+- Optional `cloudflared` and `tailscale` sidecars (compose profiles) for public exposure.
 
-### Exposure (you configure this — the product stays generic)
+## Update and remove
 
-The wizard offers three mechanisms; pick one and wire it up yourself:
+- `bash ~/infradocs/update.sh` pulls, rebuilds and restarts in place; the MongoDB volume
+  (replica-set state, history) is kept. Update secondaries one at a time, then step the
+  primary down from the Servers page and update it last.
+- `bash ~/infradocs/uninstall.sh` removes the stack (asks first).
 
-- **Domain + DNS:** the wizard detects your public IP and tells you which `A`-record to
-  create; point your domain at it (Cloudflare-fronted is fine — terminate TLS at the edge).
-  On a cloud VM, also open 80/443 in the security list/firewall.
-- **Tailscale:** no domain needed — reachable on your tailnet (Funnel), one-time login link.
-- **Cloudflare Tunnel:** paste a tunnel token; no inbound ports required.
+## Legacy
 
-### Multi-server
-
-Install the product on each host. Make one host the **primary** in its wizard; on each other
-host choose **secondary** and paste the primary URL + a join token minted on the primary
-(`POST /api/federation/tokens`). Secondaries push their scans **outbound** to the primary —
-no inbound port on the secondary. (Primary → secondary **command dispatch** is on the roadmap,
-not yet shipped.)
-
----
-
-## 2. Native systemd + nginx (legacy — the live OCI box)
-
-This is how `infra.ocialwaysfree.site` runs today: a systemd unit runs the API and host
-nginx static-serves the built frontend. The scripts in [`../deploy/`](../deploy/) were
-authored for that Ubuntu box (wildcard Let's Encrypt cert at
-`/etc/letsencrypt/live/ocialwaysfree.site/`); adapt user/paths/cert for another host.
-
-> ⚠️ Host nginx serves `frontend/dist/` **live**. A bare `npx vite build` in the repo
-> instantly changes production. Always build to a throwaway dir
-> (`npx vite build --outDir /tmp/ifd-check`) when you only want to test compilation.
-
-Files to read before running anything:
-
-- `deploy/infradocs-v6-api.service` — systemd unit. Reads `.env`, runs `uvicorn` as `msinha`
-  on `127.0.0.1:8004`. Change user/paths for your box.
-- `deploy/infra.ocialwaysfree.site.conf` — nginx vhost. Serves `frontend/dist/`, proxies
-  `/api/` → `:8004`, TLS on 443. Cert paths hardcode `/etc/letsencrypt/live/ocialwaysfree.site/`.
-- `deploy/install_service.sh` / `deploy/install_nginx.sh` — installers (the nginx one runs
-  `nginx -t` and rolls back the symlink on failure; touches no other site).
-- `deploy/uninstall_service.sh` / `deploy/uninstall_nginx.sh` — symmetric clean removal.
-- `deploy/sudoers.infradocs` — sudoers rules for the action dispatcher (systemd/nginx actions).
-
-```bash
-# 0. Populate .env (strong creds for prod)
-$EDITOR .env
-
-# 1. Build the frontend (to dist, since this box serves it live)
-cd frontend && npm install && npm run build && cd ..
-
-# 2. API service on :8004
-deploy/install_service.sh
-
-# 3. nginx vhost
-deploy/install_nginx.sh
-
-# 4. Verify
-curl -sk https://infra.ocialwaysfree.site/api/health
-```
-
-Remove cleanly:
-
-```bash
-deploy/uninstall_nginx.sh
-deploy/uninstall_service.sh
-```
-
----
-
-## Cutover plan (native → dockerized fleet)
-
-The intended migration (not yet executed): archive the native InfraDocs folder + its nginx
-config on OCI → fresh **dockerized primary** on OCI → onboard OCI-P and N150 as
-**secondaries**. The user configures exposure (Cloudflare/nginx/DNS A-record) manually at
-install time; keep the product generic. See [`CONTEXT.md`](../CONTEXT.md).
+`deploy/*.service`, `deploy/*.conf` and `deploy/install_*.sh` are the V6 native systemd +
+nginx deployment. They are not used by V7.

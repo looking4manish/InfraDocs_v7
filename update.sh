@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
 # InfraDocs in-place update — pull latest main, rebuild images, restart the stack IN PLACE,
 # PRESERVING the Mongo volume (roster, tokens, audit, last-scan snapshots), this node's role/
-# priority/reachable address, and the shared fleet secret. Does NOT re-run onboarding or wipe
+# replica-set state (term, vote, membership) and the shared fleet secret. Does NOT re-run onboarding or wipe
 # cluster state. Safe on the primary and on secondaries; works on single-node/standalone too.
 #
 #   bash update.sh            # update this node in place
 #
-# Fleet ops model: for a normal-mode fleet, update each node with update.sh (primary first,
-# then secondaries). The shared fleet secret is (re)synced from the primary as the last step.
+# Replica sets: update the secondaries one at a time first, then step the primary down from
+# the Servers page and update it last. A restarting member is just a short outage to the set.
 set -uo pipefail
 
-REPO_URL="${INFRADOCS_REPO_URL:-git@github.com:looking4manish/InfraDocs_V6.git}"
+REPO_URL="${INFRADOCS_REPO_URL:-$(git -C "${INFRADOCS_DIR:-$HOME/infradocs}" remote get-url origin 2>/dev/null || echo https://github.com/looking4manish/InfraDocs_v7.git)}"
 BRANCH="${INFRADOCS_BRANCH:-main}"
 DEPLOY_DIR="${INFRADOCS_DIR:-$HOME/infradocs}"
 DC_DIR="$DEPLOY_DIR/deploy/docker"
@@ -63,11 +63,6 @@ web_ok=""; [[ "$web_code" =~ ^(200|301|302|401|404)$ ]] && web_ok=1
 [[ -n "$mongo_ok" ]] || die "preflight: Mongo container is not up — check: ${DC[*]} --env-file .env logs mongo"
 [[ -n "$web_ok"   ]] || warn "preflight: web did not answer on :$WEB_PORT (got '$web_code'); API is up — check Caddy logs"
 
-# Converge the shared fleet secret from the primary (secondaries only; primary/single-node = no-op).
-say "Syncing shared fleet secret from primary (secondaries only)…"
-( cd "$DC_DIR" && "${DC[@]}" --env-file .env exec -T api python -m app.tools.fleet_sync ) \
-  || warn "fleet-secret sync skipped/failed (non-fatal) — re-run update.sh once the primary is reachable"
-
 echo
-ok "Update complete: $OLD -> $NEW. Stack healthy (API + Mongo up). Cluster state + fleet secret preserved."
+ok "Update complete: $OLD -> $NEW. Stack healthy (API + Mongo up). Replica-set state preserved."
 echo "  Manage: (cd \"$DC_DIR\" && ${DC[*]} --env-file .env ps | logs -f)"

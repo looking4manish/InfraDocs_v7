@@ -8,12 +8,9 @@ certs, cron) into per-application documents, and renders a React cockpit that an
 "what is running on my fleet, where is it exposed, and what is it?" — without manually
 re-joining `docker ps`, `systemctl status`, `nginx -T`, `ss`, and `du`.
 
-> The repo directory is still named `InfraDocs_V6`, but the product has moved well past
-> the original single-host "V6". It now ships as a Docker product with a first-run setup
-> wizard, bcrypt auth, primary/secondary federation, an optional AI labeling layer, and a
-> unified Web tab. If you're an AI assistant picking this up, start at
-> [`CONTEXT.md`](CONTEXT.md) (full mental model + task breadcrumbs); for the roadmap see
-> [`docs/V7_PLAN.md`](docs/V7_PLAN.md).
+> V7: the pure-black interface (design of record `docs/V7_DESIGN_mockup.html`), a replica set
+> with quorum elections ([`docs/CLUSTER.md`](docs/CLUSTER.md)), and a two-step install. If
+> you're an AI assistant picking this up, start at [`CONTEXT.md`](CONTEXT.md).
 
 ## What it does
 
@@ -35,67 +32,46 @@ re-joining `docker ps`, `systemctl status`, `nginx -T`, `ss`, and `du`.
   lens-based home (Dashboard / Projects / Servers / Web / Resources / Assets), application
   topology lanes, registries, and an audit log.
 
-## Two ways to run it
+## Install
 
-### 1. Docker product (recommended — the deployable path)
-
-The packaged product is a docker-compose stack (MongoDB + API + Caddy web) driven by an
-interactive installer that ends at a browser-reachable setup wizard.
+**First server** (becomes the primary):
 
 ```bash
-git clone https://github.com/looking4manish/InfraDocs_V6.git
-cd InfraDocs_V6/deploy/docker
-./deploy.sh          # interactive: builds, starts the stack, prints the wizard URL
-# …open the printed URL, log in (admin / Changeme001), change the password, run the wizard
-./remove.sh          # clean teardown
+git clone https://github.com/looking4manish/InfraDocs_v7.git ~/infradocs
+bash ~/infradocs/install.sh            # optional: --name oci --projects ~/projects
 ```
 
-The API container runs with host network + host PID and mounts the host filesystem
-read-only at `/host`, so the scanners see real containers, processes, ports, and configs.
-You configure exposure (domain + DNS, Tailscale, or Cloudflare Tunnel) in the wizard — the
-product is **generic**, nothing host-specific is hardcoded. See
-[`docs/DEPLOY.md`](docs/DEPLOY.md).
+The installer checks the server, picks free ports, starts the stack (MongoDB + API + Caddy)
+and prints an address and a **setup code**. Open the address, enter the code, create the
+administrator, choose how InfraDocs is reached (Tailscale, a domain, or a Cloudflare Tunnel)
+and the first scan starts.
 
-### 2. Local dev (native)
-
-Requirements: Python 3.12, Node 20+, MongoDB.
+**More servers**: Servers → Add a server. Choose voting or non-voting, then run the printed
+command on the new server:
 
 ```bash
-git clone https://github.com/looking4manish/InfraDocs_V6.git
-cd InfraDocs_V6
-
-python3 -m venv venv && source venv/bin/activate
-pip install -r requirements.txt
-cp .env.example .env          # set INFRADOCS_MONGO_URI
-
-python -m app.agent scan --summary                       # one-shot scan
-python -m uvicorn app.api.main:app --host 127.0.0.1 --port 8004   # API
-
-cd frontend && npm install && npm run dev                # → http://localhost:5173
+curl -fsSL http://<primary>:8081/join.sh | bash -s -- <join-code> --name n150
 ```
 
-First run opens a **login screen** (seeded `admin` / `Changeme001`, forced password
-change) then the **setup wizard**. See [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md).
+Three voting members turn on automatic failover. See [`docs/CLUSTER.md`](docs/CLUSTER.md).
 
-> ⚠️ **Never run a bare `npx vite build` in this repo.** The live site
-> (`infra.ocialwaysfree.site`) serves `frontend/dist/` directly via nginx, so a bare build
-> instantly changes production. Always build to a throwaway dir:
-> `npx vite build --outDir /tmp/ifd-check`.
+**Update** a server in place: `bash ~/infradocs/update.sh` (secondaries first, then step the
+primary down and update it). **Remove**: `bash ~/infradocs/uninstall.sh`.
+
+### Local development
+
+```bash
+python3 -m venv venv && source venv/bin/activate && pip install -r requirements.txt
+export INFRADOCS_MONGO_URI=mongodb://127.0.0.1:27017/ INFRADOCS_SETUP_CODE=TEST-CODE
+python -m uvicorn app.api.main:app --port 8090
+cd frontend && npm install && npm run dev
+```
 
 ## Auth
 
-bcrypt password hashing + DB-backed session tokens (sent as `Authorization: Bearer`).
-A default `admin` user is seeded with `must_change_password`. A config-credential HTTP
-Basic path remains as a fallback, and `INFRADOCS_AUTH_DISABLED=1` bypasses auth for local
-dev. See `app/auth.py` and `app/api/routers/auth.py`.
-
-## Federation (multi-server)
-
-One **primary** mints join tokens; each **secondary** pushes its scan data **outbound** to
-the primary's `/api/federation/ingest` (NAT-friendly — a secondary never needs an inbound
-port). Endpoints: `POST /api/federation/tokens`, `GET /api/federation/servers`,
-`POST /api/federation/ingest`. Command dispatch (primary → secondary actions) is designed
-but not yet built.
+The administrator is created in the setup wizard (no default password). Sessions are opaque
+tokens stored in MongoDB (`Authorization: Bearer`). Members talk to each other with a shared
+fleet secret (`X-Fleet-Auth`), handed to each new member when it joins.
 
 ## Testing
 
@@ -104,9 +80,10 @@ python -m pytest tests/ -v
 ```
 
 Suites cover scanner contracts, correlation, ports/storage registries, the ownership
-audit, the action dispatcher, auth, setup wizard, federation, exposure detectors, cert/cron
-scanners, teardown/blast-radius, and FastAPI endpoints with a real MongoDB. Integration
-tests skip automatically when `INFRADOCS_MONGO_URI` is unset.
+audit, the action dispatcher, auth, setup, the election rules and a partition simulator,
+scan ingest, exposure detectors, cert/cron scanners, teardown/blast-radius, and FastAPI
+endpoints with a real MongoDB. Integration tests skip when `INFRADOCS_MONGO_URI` is unset.
+`python scripts/cluster_live_test.py` runs three real members and a failover.
 
 ## Project layout
 
@@ -120,15 +97,16 @@ tests skip automatically when `INFRADOCS_MONGO_URI` is unset.
 │   ├── actions.py        # action dispatcher + allow-list
 │   ├── ai.py             # optional LLM layer (label_service + fleet_insights)
 │   ├── auth.py           # bcrypt + DB sessions
-│   ├── federation.py     # primary/secondary join + ingest
+│   ├── election.py       # replica-set election rules (pure)
+│   ├── election_manager.py / cluster_runtime.py   # one member: timers, RPCs, storage
+│   ├── federation.py     # scan push to the primary
 │   ├── blast_radius.py / teardown.py        # guarded project teardown
 │   ├── agent.py          # CLI: python -m app.agent scan
 │   └── api/              # FastAPI app + routers (auth, setup, federation, endpoints, ai, …)
-├── frontend/             # React 19 + Vite + Tailwind + React Query (Neon-Depth theme)
+├── frontend/             # React 19 + Vite + React Query (V7 pure-black theme)
 ├── deploy/
 │   ├── docker/           # docker-compose product: deploy.sh, remove.sh, Caddyfile, Dockerfiles
-│   └── *.service / *.conf / install_*.sh    # legacy native systemd + nginx
-├── docs/                 # ARCHITECTURE, DEPLOY, DEVELOPMENT, V7_PLAN, phases/
+├── docs/                 # CLUSTER, ARCHITECTURE, DEPLOY, DEVELOPMENT, V7 design + API contract
 ├── tests/                # pytest suite (unit + integration)
 ├── CONTEXT.md            # single LLM-onboarding doc (mental model + task breadcrumbs)
 ├── config.yml            # non-secret app config
@@ -137,16 +115,9 @@ tests skip automatically when `INFRADOCS_MONGO_URI` is unset.
 
 ## Status
 
-The original V6 build phases (1–9A: foundation → scanners → API → frontend → correlation →
-nginx exposure → registries → operational controls) are all complete. The product has since
-gained: bcrypt/session auth, a first-run wizard, the Docker product (`deploy.sh`/`remove.sh`),
-multi-mechanism exposure detection (nginx/Caddy/cloudflared), primary/secondary federation,
-the AI labeling layer, and the unified Web tab.
-
-**In flight / next:** command dispatch (primary→secondary actions), the full federation
-viewing UI (Servers page + token mint + server switcher), and the production cutover
-(fresh dockerized primary on OCI, OCI-P + N150 as secondaries). See
-[`docs/V7_PLAN.md`](docs/V7_PLAN.md) and [`CONTEXT.md`](CONTEXT.md).
+V7: new interface, quorum-based replica set with automatic failover for an odd number of
+voting members, simpler install and join. Next: run the first server on OCI, then join OCI-P
+and N150 to form the P-S-S set.
 
 ## License
 
