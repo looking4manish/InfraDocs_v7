@@ -1,5 +1,6 @@
 """Scan endpoints — list history, trigger a new scan (background)."""
 
+import threading
 from datetime import datetime, timezone
 from typing import Optional
 from uuid import uuid4
@@ -87,37 +88,26 @@ def _run_scan_job(scan_id: str, cfg: Config):
         project_dirs=pd.project_paths(),  # host-aware, all configured roots
     )
     attach_root_paths(applications, pd.project_paths())
-    apps_written = db.replace_applications(applications)
+    apps_written = db.replace_applications(applications, server_id=cfg.server.id)
+    # Assets that disappeared since the last scan of THIS server are removed; other servers'
+    # assets (pushed to the primary) are left alone.
+    seen = [a.get("asset_id") for a in all_assets if a.get("asset_id")]
+    db.db.assets.delete_many({"server_id": cfg.server.id, "asset_id": {"$nin": seen}})
 
     # Ports + storage registries — the UI "Scan now" was leaving these stale
     # (only the CLI agent built them), so storage/ports summaries read 0.
     valid_projects = pd.list_projects() + [SYSTEM_BUCKET]
     db.replace_ports(build_ports_registry(
         all_assets, server_id=cfg.server.id, valid_projects=valid_projects,
-    ))
+    ), server_id=cfg.server.id)
     db.replace_storage(build_storage_registry(
         all_assets, server_id=cfg.server.id,
         projects_root=cfg.paths.projects_root, valid_projects=valid_projects,
-    ))
+    ), server_id=cfg.server.id)
 
-    # Data sync: a non-primary pushes its scan to the CURRENT leader (direct mesh).
-    # The target follows gossip — whichever node currently serves as primary — so after
-    # a failover the push retargets automatically. Missing a few rounds is fine (scan
-    # data is re-derivable). No shared DB; reuses the direct /ingest endpoint.
-    self_doc = db.db.cluster.find_one({"_id": "self"}) or {}
-    fed = db.db.settings.find_one({"_id": "app"}) or {}
-    if not self_doc.get("is_primary") and fed.get("join_token"):
-        from app import cluster as _cluster
-        roster = {n["node_id"]: n for n in db.db.cluster_nodes.find({}, {"_id": 0})}
-        target = _cluster.current_leader_address(roster) or fed.get("primary_url")
-        if target:
-            try:
-                from app import federation as _federation
-                _federation.push_to_primary(
-                    target, fed["join_token"], cfg.server.id, all_assets, applications,
-                )
-            except Exception:
-                pass  # never fail a scan because the leader is unreachable
+    # Data sync: a secondary pushes its scan to whichever member is primary now. After a
+    # failover the target follows the election. Missing a push is fine: the next scan repeats it.
+    push_to_leader(cfg, all_assets, applications)
 
     finished = datetime.now(timezone.utc)
     db.db.scan_logs.update_one(
@@ -137,6 +127,47 @@ def _run_scan_job(scan_id: str, cfg: Config):
     db.close()
 
 
+def push_to_leader(cfg: Config, assets, applications) -> bool:
+    import logging
+    from app import cluster_runtime as RT
+    n = RT.node()
+    if n is None or n.is_primary():
+        return False
+    target = RT.leader_address()
+    if not target:
+        return False
+    try:
+        from app import federation as _federation
+        from app.fleet_auth import get_fleet_secret
+        _db = DBManager(uri=cfg.mongodb.uri, database=cfg.mongodb.database)
+        try:
+            secret = get_fleet_secret(_db)
+        finally:
+            _db.close()
+        _federation.push_to_primary(target, secret, cfg.server.id, assets, applications, term=RT.current_term())
+        return True
+    except Exception as e:  # noqa: BLE001 — never fail a scan because the primary is unreachable
+        logging.getLogger("app.scan").warning("scan push to %s failed: %s", target, e)
+        return False
+
+
+_scan_lock = threading.Lock()
+
+
+def run_scan_now(cfg: Optional[Config] = None) -> Optional[str]:
+    """Run one scan synchronously unless one is already running. Returns the scan id, or None
+    when another scan was in progress."""
+    from app.api.dependencies import get_config as _gc
+    if not _scan_lock.acquire(blocking=False):
+        return None
+    try:
+        scan_id = uuid4().hex
+        _run_scan_job(scan_id, cfg or _gc())
+        return scan_id
+    finally:
+        _scan_lock.release()
+
+
 @router.post("/trigger", status_code=202)
 def trigger_scan(
     background: BackgroundTasks,
@@ -144,7 +175,7 @@ def trigger_scan(
     _: str = Depends(verify_auth),
 ):
     scan_id = uuid4().hex
-    background.add_task(_run_scan_job, scan_id, cfg)
+    background.add_task(run_scan_now, cfg)
     return {"scan_id": scan_id, "status": "queued"}
 
 

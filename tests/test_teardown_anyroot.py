@@ -125,11 +125,9 @@ def test_teardown_via_fleet_proxy_refused_when_node_unreachable(client_fx, db_fx
     cfg = load_config(str(ROOT / "config.yml"))
     node = cfg.server.id
     auth = (cfg.auth.username, os.environ.get(cfg.auth.password_env) or cfg.auth.dev_password)
-    db_fx.db.cluster.update_one({"_id": "self"},
-        {"$set": {"node_id": node, "is_primary": True, "priority": 1, "address": "http://localhost:8090"}}, upsert=True)
-    db_fx.db.cluster_nodes.update_one({"node_id": "n2"},
-        {"$set": {"node_id": "n2", "priority": 2, "address": "http://n2:8081", "last_seen": _now() - timedelta(seconds=600)}},
-        upsert=True)
+    from tests import cluster_fixture as CF
+    CF.self_primary(node)
+    CF.add_secondary("n2", _now() - timedelta(seconds=600))
     # Teardown fired at an UNREACHABLE node via the switcher must hit the 409 action-gate.
     r = client_fx.post("/api/fleet/n2/api/applications/web/teardown", auth=auth,
                        json={"dry_run": False, "confirm": "web"})

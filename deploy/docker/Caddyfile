@@ -6,6 +6,11 @@
 		reverse_proxy {$API_UPSTREAM:http://host.docker.internal:8004}
 	}
 
+	# The one-line join command on the Servers page downloads this from the API.
+	handle /join.sh {
+		reverse_proxy {$API_UPSTREAM:http://host.docker.internal:8004}
+	}
+
 	handle {
 		root * /srv
 		try_files {path} /index.html

@@ -86,6 +86,8 @@ class ScanningConfig(BaseModel):
     schedule: str = "0 */6 * * *"
     timeout: int = 300
     enabled_scanners: List[str] = []
+    # Every server scans itself this often; a secondary then pushes the result to the primary.
+    interval_minutes: int = 10
 
 
 class LoggingConfig(BaseModel):
@@ -101,21 +103,10 @@ class AuthConfig(BaseModel):
 
 
 class FederationConfig(BaseModel):
-    # Gossip cluster + failover. OFF by default so installing this code on a host
-    # changes nothing until a real multi-node fleet is deliberately wired up.
-    cluster_enabled: bool = False
-    # Every node health-checks every peer this often. A peer unheard-from for
-    # ~MISS_ROUNDS intervals (unreachable_after) is treated as down; the primary is
-    # considered lost after the same window, which then (in a majority) triggers an
-    # election. Loose enough that a single missed round never causes a failover.
-    health_interval_seconds: int = 10
-    unreachable_after_seconds: int = 30  # 3 missed rounds
-    # AUTOMATIC FAILOVER — when a primary is lost, may a surviving node in the majority
-    # partition auto-promote itself? OFF for the moment: elections still run (roster stays
-    # fresh, followers follow, a partitioned primary still steps down = split-brain guard
-    # intact), but NO node auto-takes-primary. Taking over is a MANUAL operator action
-    # (Admin · Cluster → Promote / Make primary). Hot-toggleable at runtime.
-    auto_failover: bool = True
+    """Replica-set timing (MongoDB defaults). Elections themselves are on whenever the set
+    has an odd number of voting members (3, 5 or 7); see app/election.py."""
+    heartbeat_seconds: float = 2.0
+    election_timeout_seconds: float = 10.0
 
 
 class Config(BaseModel):

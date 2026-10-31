@@ -3,7 +3,7 @@
 Live-proxy with stale-fallback: a reachable node is proxied in real time and its actions
 run live; an unreachable node falls back to the last-synced snapshot it previously pushed
 to the leader, LOUDLY flagged stale, with live actions refused (409). Reachability +
-address come from the live gossip roster (app.cluster state / cluster_nodes), NOT a cache.
+address come from the election engine (app.cluster_runtime), NOT a cache.
 This is a view+proxy layer only — it does not touch election/gossip/majority-guard/override.
 """
 
@@ -15,7 +15,6 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, Request, Response
 
-from app import cluster as CC
 from app.api.dependencies import get_config, get_db, verify_auth
 from app.fleet_auth import get_fleet_secret
 from app.core.config_loader import Config
@@ -32,29 +31,23 @@ def _http_forward(method: str, url: str, headers: dict, body: Optional[bytes], t
 
 
 def _fleet_nodes(db: DBManager, cfg: Config):
-    """Every roster node (self + non-tombstoned cluster_nodes) with address, live
-    reachability, leader flag, and last_synced_at — from the live gossip roster."""
-    now = datetime.now(timezone.utc)
-    timeout = cfg.federation.unreachable_after_seconds
+    """Every replica-set member with address, live reachability (from the election engine's
+    heartbeats), leader flag and when its scan last reached this server."""
+    from app import cluster_runtime as RT
     node_id = cfg.server.id
-    s = db.db.cluster.find_one({"_id": "self"}) or {}
-    tomb = {t["node_id"] for t in db.db.cluster_tombstones.find({}, {"_id": 0, "node_id": 1})}
     synced = {x["server_id"]: x for x in db.db.federation_servers.find({}, {"_id": 0})}
-    rows = [{
-        "node_id": node_id, "address": s.get("address"), "is_primary": bool(s.get("is_primary")),
-        "self": True, "reachable": True, "last_synced_at": None,
-    }]
-    for n in db.db.cluster_nodes.find({}, {"_id": 0}):
-        nid = n["node_id"]
-        if nid == node_id or nid in tomb:
-            continue
-        fs = synced.get(nid, {})
-        rows.append({
-            "node_id": nid, "address": n.get("address"), "is_primary": bool(n.get("is_primary")),
-            "self": False, "reachable": CC._age(now, n.get("last_seen")) <= timeout,
-            "last_synced_at": fs.get("last_synced_at") or fs.get("last_seen"),
-        })
-    leader = next((r["node_id"] for r in rows if r["is_primary"] and r["reachable"]), node_id)
+    n = RT.node()
+    if n is None:
+        rows = [{"node_id": node_id, "address": None, "is_primary": True, "self": True,
+                 "reachable": True, "last_synced_at": None}]
+        leader = node_id
+    else:
+        st = n.status()
+        rows = [{"node_id": m["node_id"], "address": m["address"], "is_primary": m["role"] == "primary",
+                 "self": m["is_self"], "reachable": m["healthy"],
+                 "last_synced_at": None if m["is_self"] else (synced.get(m["node_id"], {}).get("last_synced_at"))}
+                for m in st["members"]]
+        leader = st["leader_id"] or node_id
     for r in rows:
         r["is_leader"] = r["node_id"] == leader
         r["stale"] = not r["reachable"]

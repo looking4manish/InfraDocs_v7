@@ -1,4 +1,4 @@
-"""First-run setup wizard — status, IP detection, and completion.
+"""First-run setup — detection, the wizard's completion, and joining an existing replica set.
 
 IP detection is deliberately careful: it reports the public IP as seen from the
 internet AND classifies every local interface, loudly flagging Tailscale / VPN /
@@ -11,6 +11,11 @@ import json
 import subprocess
 import urllib.request
 from typing import List, Optional
+
+import os
+import secrets
+import threading
+from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
@@ -129,113 +134,238 @@ def detect_ip(_: str = Depends(verify_auth)):
     }
 
 
-# ---- status + completion ------------------------------------------------
+# ---- detection -----------------------------------------------------------
+
+def _setup_code() -> str:
+    return os.environ.get("INFRADOCS_SETUP_CODE", "")
+
+
+def _setup_open(db: DBManager) -> bool:
+    return not _settings(db).get("setup_complete")
+
+
+def _require_open_with_code(db: DBManager, code: Optional[str]) -> None:
+    if not _setup_open(db):
+        raise HTTPException(status_code=409, detail="setup is already complete")
+    expected = _setup_code()
+    if not expected:
+        raise HTTPException(status_code=403, detail="installer did not set a setup code")
+    if not code or not secrets.compare_digest(code.strip(), expected):
+        raise HTTPException(status_code=403, detail="setup code does not match")
+
+
+def _web_port() -> int:
+    try:
+        return int(os.environ.get("INFRADOCS_WEB_PORT", "8081"))
+    except ValueError:
+        return 8081
+
+
+def _projects_root() -> str:
+    from app.core.config_loader import get_config
+    return get_config().paths.projects_root
+
+
+def _count_projects(root: str) -> Optional[int]:
+    base = Path(os.environ.get("INFRADOCS_HOST_ROOT", "/") + root) if os.environ.get("INFRADOCS_HOST_ROOT") else Path(root)
+    for b in (Path(root), base):
+        try:
+            return sum(1 for c in b.iterdir() if c.is_dir() and not c.name.startswith("."))
+        except OSError:
+            continue
+    return None
+
+
+def _docker_version() -> Optional[str]:
+    try:
+        import docker
+        return docker.from_env().version().get("Version")
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _mongo_ok(db: DBManager) -> bool:
+    try:
+        db.db.command("ping")
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def detect(db: DBManager) -> dict:
+    from app.cluster_runtime import host_facts
+    ifaces = _interfaces()
+    ts = next((i["ip"] for i in ifaces if i["kind"] == "tailscale"), None) or os.environ.get("INFRADOCS_TAILSCALE_IP")
+    ts_dns = os.environ.get("INFRADOCS_TAILSCALE_DNS") or None
+    public_ip = os.environ.get("INFRADOCS_PUBLIC_IP") or None
+    host = host_facts()
+    root = _projects_root()
+    found = _count_projects(root)
+    docker_v = _docker_version()
+    port = _web_port()
+    host_mounted = os.path.isdir(os.path.join(os.environ.get("INFRADOCS_HOST_ROOT", "/"), "etc"))
+    checks = [
+        {"id": "port", "ok": True, "label": f"Port {port} is serving"},
+        {"id": "docker", "ok": bool(docker_v), "label": "Docker socket readable" if docker_v else "Docker socket not readable"},
+        {"id": "host", "ok": host_mounted, "label": "Host filesystem mounted read-only" if host_mounted else "Host filesystem not mounted"},
+        {"id": "mongo", "ok": _mongo_ok(db), "label": "MongoDB started"},
+        {"id": "projects", "ok": found is not None, "label": f"{found} project folders found" if found is not None else f"{root} not readable"},
+    ]
+    return {"hostname": _server_id(), "os": host.get("os"), "cpu_count": host.get("cpu_count"),
+            "mem_gb": host.get("mem_gb"), "tailscale_ip": ts, "tailscale_dns": ts_dns, "public_ip": public_ip,
+            "docker_version": docker_v, "port": port, "projects_folder": root, "projects_found": found,
+            "checks": checks}
+
+
+def _suggested_address(d: dict) -> str:
+    host = d.get("tailscale_dns") or d.get("tailscale_ip") or d.get("public_ip") or "localhost"
+    return f"http://{host}:{d['port']}"
+
 
 @router.get("/status")
 def status(db: DBManager = Depends(get_db)):
     s = _settings(db)
-    return {
-        "setup_complete": bool(s.get("setup_complete")),
-        "server_name": s.get("server_name"),
-        "role": s.get("role"),
-        "exposure": s.get("exposure"),
-    }
+    out = {"setup_complete": bool(s.get("setup_complete")), "server_name": s.get("server_name"),
+           "role": s.get("role"), "needs_setup_code": bool(_setup_code())}
+    if not out["setup_complete"]:
+        d = detect(db)
+        out["detected"] = d
+        out["suggested_address"] = _suggested_address(d)
+    return out
+
+
+class AddressCheck(BaseModel):
+    address: str
+
+
+@router.post("/check-address")
+def check_address(req: AddressCheck, db: DBManager = Depends(get_db)):
+    """Is this address really THIS server? Other servers will use it to reach the primary."""
+    from app.federation import _get_json, probe_failure_reason
+    if not _setup_open(db):
+        raise HTTPException(status_code=409, detail="setup is already complete")
+    addr = req.address.strip().rstrip("/")
+    if not addr.startswith(("http://", "https://")):
+        return {"reachable": False, "reason": "address must start with http:// or https://"}
+    try:
+        who = _get_json(addr + "/api/cluster/rpc/ping", timeout=6)
+    except Exception as e:  # noqa: BLE001
+        return {"reachable": False, "reason": probe_failure_reason(addr, e)}
+    if who.get("node_id") != _server_id():
+        return {"reachable": False, "reason": f"that address answers as {who.get('node_id')}"}
+    return {"reachable": True, "reason": None}
+
+
+class Admin(BaseModel):
+    username: str
+    password: str
+
+
+class Access(BaseModel):
+    mode: str = "tailscale"
+    address: str
 
 
 class CompleteRequest(BaseModel):
+    setup_code: Optional[str] = None
+    admin: Admin
     server_name: Optional[str] = None
-    role: str = "standalone"             # standalone | primary | secondary
-    exposure: str = "domain"             # domain | tailscale | cloudflare
-    domain: Optional[str] = None
-    primary_url: Optional[str] = None    # for secondary
-    join_token: Optional[str] = None     # for secondary
-    advertise_url: Optional[str] = None  # this node's own reachable address (any transport)
-    priority: Optional[int] = None       # 1-99; secondary picks a free one (primary auto = 1)
-    # Optional AI labeling — any OpenAI-compatible endpoint (OpenAI / local Ollama / …).
-    ai_endpoint: Optional[str] = None
-    ai_key: Optional[str] = None
-    ai_model: Optional[str] = None
+    projects_folder: Optional[str] = None
+    access: Access
 
 
-def enroll_secondary(db: DBManager, node_id: str, primary_url: str, join_token: str,
-                     advertise_url: str, priority: int) -> dict:
-    """Shared secondary-enroll used by BOTH the installer path (/api/setup/complete) and
-    the Admin tab (/api/cluster/join), so the two can NEVER drift. Runs the bidirectional
-    reachability handshake against the primary (the canonical enroll API); on success,
-    persists this node's cluster self-record as a secondary. Returns {ok, directions, reason}."""
-    from app import federation as F
-    from app.cli_install import normalize_url
-    advertise_url = normalize_url(advertise_url)
-    primary_url = normalize_url(primary_url)
-    result = F.enroll_with_primary(primary_url, advertise_url, join_token, node_id, priority)
-    if result.get("ok"):
-        db.db.cluster.update_one(
-            {"_id": "self"},
-            {"$set": {"node_id": node_id, "priority": int(priority), "address": advertise_url,
-                      "is_primary": False, "override": False}},
-            upsert=True,
-        )
-        # Store the shared fleet secret delivered over the trusted enroll channel (+ the
-        # creds to re-sync it later), then strip it so it never propagates to the HTTP caller.
-        sec = result.pop("fleet_secret", None)
-        if sec:
-            from app.fleet_auth import store_fleet_config
-            store_fleet_config(db, primary_url, join_token, sec)
-    return result
+def _validate_admin(a: Admin) -> None:
+    import re
+    if not re.fullmatch(r"[a-z][a-z0-9._-]{1,31}", a.username or ""):
+        raise HTTPException(status_code=400, detail="username: lower-case letters, digits, . _ -")
+    if len(a.password or "") < 12:
+        raise HTTPException(status_code=400, detail="password: at least 12 characters")
+
+
+def _start_first_scan(cfg_server_id: str) -> None:
+    def run():
+        try:
+            from app.api.routers.scans import run_scan_now
+            run_scan_now()
+        except Exception as e:  # noqa: BLE001
+            import logging
+            logging.getLogger("app.setup").warning("first scan failed: %s", e)
+    threading.Thread(target=run, name="first-scan", daemon=True).start()
 
 
 @router.post("/complete")
-def complete(req: CompleteRequest, actor: str = Depends(verify_auth), db: DBManager = Depends(get_db)):
+def complete(req: CompleteRequest, db: DBManager = Depends(get_db)):
+    """First server: create the administrator, record how it is reached, form a one-member
+    replica set with this server as primary, and start the first scan."""
+    from app import cluster_runtime as RT
+    _require_open_with_code(db, req.setup_code)
+    _validate_admin(req.admin)
+    if req.access.mode not in ("tailscale", "domain", "cloudflare"):
+        raise HTTPException(status_code=400, detail="access mode must be tailscale, domain or cloudflare")
+    addr = req.access.address.strip().rstrip("/")
+    if not addr.startswith(("http://", "https://")):
+        raise HTTPException(status_code=400, detail="address must start with http:// or https://")
     node_id = _server_id()
-    # The first node (primary/standalone) auto-takes priority 1 and is primary.
-    priority = 1 if req.role in ("primary", "standalone") else req.priority
+    db.db.users.delete_many({})
+    db.db.users.insert_one({"username": req.admin.username, "password_hash": A.hash_password(req.admin.password),
+                            "must_change_password": False})
+    _save_settings(db, {"setup_complete": True, "server_name": (req.server_name or node_id).strip(),
+                        "role": "primary", "exposure": req.access.mode, "advertise_url": addr,
+                        "projects_folder": req.projects_folder or _projects_root(),
+                        "completed_by": req.admin.username})
+    RT.bootstrap_first_server(db, node_id, addr)
+    RT.start(db, node_id)
+    _start_first_scan(node_id)
+    return {"ok": True, "token": A.create_session(db, req.admin.username), "scan_started": True}
 
-    if req.role == "secondary":
-        if not (req.primary_url and req.join_token and req.advertise_url and req.priority):
-            raise HTTPException(
-                status_code=400,
-                detail="secondary needs primary_url, join_token, advertise_url, and a priority (1-99)",
-            )
-        result = enroll_secondary(db, node_id, req.primary_url, req.join_token,
-                                  req.advertise_url, req.priority)
-        if not result.get("ok"):
-            raise HTTPException(
-                status_code=400,
-                detail={"message": "enrollment refused",
-                        "directions": result.get("directions", {}),
-                        "reason": result.get("reason")},
-            )
-    else:
-        # primary / standalone: this node serves directly (its own cluster self-record).
-        db.db.cluster.update_one(
-            {"_id": "self"},
-            {"$set": {"node_id": node_id, "priority": priority, "address": req.advertise_url,
-                      "is_primary": True, "override": False}},
-            upsert=True,
-        )
-        db.db.settings.update_one({"_id": "app"}, {"$set": {"primary_node": node_id}}, upsert=True)
 
-    patch = {
-        "setup_complete": True,
-        "server_name": req.server_name,
-        "role": req.role,
-        "exposure": req.exposure,
-        "domain": req.domain,
-        "primary_url": req.primary_url,
-        "join_token": req.join_token,
-        "advertise_url": req.advertise_url,
-        "priority": priority,
-        "completed_by": actor,
-    }
-    # Only overwrite AI config when provided (so re-running setup doesn't wipe it).
-    if req.ai_endpoint is not None:
-        patch["ai_endpoint"] = req.ai_endpoint
-    if req.ai_key:
-        patch["ai_key"] = req.ai_key
-    if req.ai_model:
-        patch["ai_model"] = req.ai_model
-    _save_settings(db, patch)
-    return {"ok": True, "setup_complete": True, "role": req.role}
+class JoinRequest(BaseModel):
+    setup_code: Optional[str] = None
+    primary_url: str
+    code: str
+    address: str
+    server_name: Optional[str] = None
+
+
+@router.post("/join")
+def join(req: JoinRequest, db: DBManager = Depends(get_db)):
+    """Later servers: called by the installer on this server. Presents the join code to the
+    primary, which connects back and adds this server; then this server follows the primary."""
+    from app import cluster_runtime as RT
+    from app.federation import _post_json, probe_failure_reason
+    from app.fleet_auth import store_fleet_config
+    import urllib.error
+    import json as _json
+    _require_open_with_code(db, req.setup_code)
+    node_id = _server_id()
+    addr = req.address.strip().rstrip("/")
+    primary = req.primary_url.strip().rstrip("/")
+    try:
+        res = _post_json(primary + "/api/cluster/rpc/join",
+                         {"code": req.code, "node_id": node_id, "address": addr, "version": RT.VERSION}, timeout=30)
+    except urllib.error.HTTPError as e:
+        try:
+            detail = _json.loads(e.read().decode()).get("detail")
+        except Exception:  # noqa: BLE001
+            detail = f"HTTP {e.code}"
+        raise HTTPException(status_code=400, detail=f"primary refused: {detail}")
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail="cannot reach the primary: " + probe_failure_reason(primary, e))
+    store_fleet_config(db, primary, "", res["fleet_secret"])
+    db.db.users.delete_many({})
+    for u in res.get("users") or []:
+        if u.get("username") and u.get("password_hash"):
+            db.db.users.insert_one(u)
+    RT.adopt_joined_state(db, res["term"], res["config"], res.get("leader_id"))
+    _save_settings(db, {"setup_complete": True, "server_name": (req.server_name or node_id).strip(),
+                        "role": "secondary", "advertise_url": addr, "joined_primary": primary})
+    RT.start(db, node_id)
+    _start_first_scan(node_id)
+    from app import election as E
+    cfg = E.Config.from_dict(res["config"])
+    mode, why = E.failover_mode(cfg)
+    me = cfg.member(node_id)
+    return {"ok": True, "node_id": node_id, "votes": me.votes if me else None, "mode": mode, "mode_reason": why}
 
 
 def _server_id() -> str:

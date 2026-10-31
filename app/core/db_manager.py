@@ -107,9 +107,13 @@ class DBManager:
             app["_id"] = str(app["_id"])
         return app
 
-    def replace_applications(self, new_apps: List[Dict]) -> int:
+    def replace_applications(self, new_apps: List[Dict], server_id: Optional[str] = None) -> int:
         """Wipe and rewrite the applications collection — used by correlator."""
-        self.db.applications.delete_many({})
+        # Scoped to one server: a scan on the primary must not wipe what secondaries pushed.
+        self.db.applications.delete_many({"server_id": server_id} if server_id else {})
+        if server_id:
+            for _d in new_apps:
+                _d.setdefault("server_id", server_id)
         if not new_apps:
             return 0
         now = datetime.now(timezone.utc)
@@ -121,9 +125,13 @@ class DBManager:
 
     # ---------- ports registry (Phase 7B) ----------
 
-    def replace_ports(self, new_ports: List[Dict]) -> int:
+    def replace_ports(self, new_ports: List[Dict], server_id: Optional[str] = None) -> int:
         """Wipe and rewrite the ports collection — used by ports_registry."""
-        self.db.ports.delete_many({})
+        # Scoped to one server: a scan on the primary must not wipe what secondaries pushed.
+        self.db.ports.delete_many({"server_id": server_id} if server_id else {})
+        if server_id:
+            for _d in new_ports:
+                _d.setdefault("server_id", server_id)
         if not new_ports:
             return 0
         now = datetime.now(timezone.utc)
@@ -159,8 +167,12 @@ class DBManager:
 
     # ---------- storage registry (Phase 7C) ----------
 
-    def replace_storage(self, new_rows: List[Dict]) -> int:
-        self.db.storage.delete_many({})
+    def replace_storage(self, new_rows: List[Dict], server_id: Optional[str] = None) -> int:
+        # Scoped to one server: a scan on the primary must not wipe what secondaries pushed.
+        self.db.storage.delete_many({"server_id": server_id} if server_id else {})
+        if server_id:
+            for _d in new_rows:
+                _d.setdefault("server_id", server_id)
         if not new_rows:
             return 0
         now = datetime.now(timezone.utc)
@@ -259,7 +271,14 @@ class DBManager:
 
         self.db.projects.create_index("project_name", unique=True)
 
-        self.db.applications.create_index("name", unique=True)
+        # One server's application names are unique; two servers may both run "nextcloud".
+        try:
+            self.db.applications.drop_index("name_1")
+        except Exception:  # noqa: BLE001 — absent on fresh installs
+            pass
+        self.db.applications.create_index([("server_id", ASCENDING), ("name", ASCENDING)], unique=True)
+        self.db.applications.create_index("server_id")
+        self.db.assets.create_index("server_id")
         self.db.applications.create_index("application_id", unique=True)
         self.db.applications.create_index("internet_exposed")
 

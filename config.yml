@@ -112,15 +112,7 @@ auth:
   dev_password: msinha123
 
 federation:
-  # Priority-ranked gossip cluster with automatic failover (no shared DB).
-  # Disabled by default — turn on only on a real multi-node tailnet fleet.
-  cluster_enabled: false
-  # Health-check every peer every 10s; a peer (or the primary) unheard-from for 30s
-  # (3 missed rounds) is treated as down. A single missed round never fails over.
-  health_interval_seconds: 10
-  unreachable_after_seconds: 30
-  # Automatic failover is OFF for now: a lost primary does NOT trigger an auto-promotion.
-  # Gossip still runs (roster stays fresh, followers follow, a partitioned primary still
-  # steps down) but taking over primary is a MANUAL action in Admin · Cluster. Toggle live
-  # from the Admin tab or flip here. The split-brain / majority guard is unaffected.
-  auto_failover: false
+  # Replica set (P-S-S). Heartbeats every 2 s; a primary unheard-from for 10 s is replaced by
+  # an election. Automatic failover runs only with an odd number of voting members (3, 5, 7).
+  heartbeat_seconds: 2
+  election_timeout_seconds: 10

@@ -96,7 +96,7 @@ def client(cfg, monkeypatch):
 def test_root(client):
     r = client.get("/")
     assert r.status_code == 200
-    assert r.json()["name"] == "InfraDocs V6"
+    assert r.json()["name"] == "InfraDocs"
 
 
 def test_health(client):

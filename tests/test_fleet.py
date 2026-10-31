@@ -18,6 +18,7 @@ from app.api import dependencies as api_deps
 from app.api.main import app
 from app.core.config_loader import load_config
 from app.core.db_manager import DBManager
+from tests import cluster_fixture as CF
 
 TEST_DB = "infradocs_fleet_test"
 
@@ -56,15 +57,11 @@ def _now():
 
 
 def _self_primary(db):
-    db.db.cluster.update_one({"_id": "self"},
-        {"$set": {"node_id": NODE, "priority": 1, "is_primary": True, "address": "http://localhost:8090"}},
-        upsert=True)
+    CF.self_primary(NODE)
 
 
 def _secondary(db, nid, seen, address="http://n2:8081"):
-    db.db.cluster_nodes.update_one({"node_id": nid},
-        {"$set": {"node_id": nid, "priority": 2, "address": address, "is_primary": False, "last_seen": seen}},
-        upsert=True)
+    CF.add_secondary(nid, seen, address)
 
 
 def test_nodes_single_install_one_entry_no_stale(client, db):
@@ -115,15 +112,18 @@ def test_action_is_refused_when_target_node_is_unreachable(client, db):
 
 
 def test_leader_persists_full_scan_payload_viewable_after_node_down(client, db):
+    from app.fleet_auth import set_fleet_secret
     _self_primary(db)
-    tok = client.post("/api/federation/tokens", auth=AUTH, json={"server_id": "n2"}).json()["token"]
-    ing = client.post("/api/federation/ingest", headers={"X-Join-Token": tok},
-        json={"server_id": "n2",
+    _secondary(db, "n2", _now())
+    set_fleet_secret(db, "SEC")
+    ing = client.post("/api/federation/ingest", headers={"X-Fleet-Auth": "SEC"},
+        json={"server_id": "n2", "term": 1,
               "assets": [{"category": "docker_container", "name": "c1", "project": "p"}],
               "applications": [{"name": "p", "type": "project"}]})
     assert ing.status_code == 200
     fs = db.db.federation_servers.find_one({"server_id": "n2"})
     assert fs.get("last_synced_at") is not None  # leader stored the sync timestamp
+    CF.self_primary(NODE)
     _secondary(db, "n2", _now() - timedelta(seconds=600))  # now down
     apps = client.get("/api/fleet/n2/api/applications/list", auth=AUTH)
     assert apps.status_code == 200 and apps.headers.get("X-Fleet-Stale") == "1"

@@ -1,25 +1,37 @@
-"""InfraDocs V6 API entry point."""
+"""InfraDocs V7 API entry point."""
 
-import asyncio  # noqa: E402
+import threading  # noqa: E402
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 from dotenv import load_dotenv
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
 # Load .env from project root before any other module touches os.environ.
 ROOT = Path(__file__).resolve().parents[2]
 load_dotenv(ROOT / ".env", override=False)
 
-from app import auth as _auth  # noqa: E402
-from app import cluster as CC  # noqa: E402
-from app import cluster_manager as _cluster  # noqa: E402
+from app import cluster_runtime as RT  # noqa: E402
 from app.api.dependencies import get_config, get_db  # noqa: E402
 from app.api.routers import (  # noqa: E402
     actions, ai, applications, assets, auth, cluster, endpoints, federation, fleet, health, ports, projects, scans, setup, storage,
 )
 from app.core.logger import setup_logger  # noqa: E402
+
+
+def _scan_scheduler(cfg, stop: threading.Event, logger) -> None:
+    """Every server scans itself every `scanning.interval_minutes`; a secondary pushes the
+    result to the primary. Runs only once setup is complete."""
+    from app.api.routers.scans import run_scan_now
+    interval = max(1, int(cfg.scanning.interval_minutes)) * 60
+    while not stop.wait(interval):
+        try:
+            db = get_db()
+            if (db.db.settings.find_one({"_id": "app"}) or {}).get("setup_complete"):
+                run_scan_now(cfg)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("scheduled scan failed: %s", e)
 
 
 @asynccontextmanager
@@ -28,26 +40,24 @@ async def lifespan(app: FastAPI):
     cfg = get_config()
     db = get_db()
     db.create_indexes()
-    _auth.seed_default_admin(db, cfg.auth.username)
-    logger.info(f"API started for server '{cfg.server.id}'")
-    app.state.gossip_task = None
-    app.state.cluster_logger = logger
-    # Effective flag = config default OR a persisted runtime override, so an operator's
-    # in-UI enable survives a restart. The Admin tab starts/stops this task live.
-    if _cluster.is_enabled(cfg, db):
-        _cluster.start_gossip(app, cfg, db, logger)
+    logger.info(f"API {RT.VERSION} started for server '{cfg.server.id}'")
+    if RT.start(db, cfg.server.id):
+        logger.info("replica set member — election loop running")
+    stop = threading.Event()
+    threading.Thread(target=_scan_scheduler, args=(cfg, stop, logger), name="scan-scheduler", daemon=True).start()
     try:
         yield
     finally:
-        _cluster.stop_gossip(app, logger)
+        stop.set()
+        RT.stop()
         db.close()
         logger.info("API shutdown complete")
 
 
 app = FastAPI(
-    title="InfraDocs V6 API",
-    version="0.1.0",
-    description="Single-host (OCI) infrastructure documentation API.",
+    title="InfraDocs API",
+    version=RT.VERSION,
+    description="Infrastructure documentation across a replica set of servers.",
     lifespan=lifespan,
 )
 
@@ -79,28 +89,21 @@ app.include_router(scans.router, prefix="/api/scans", tags=["scans"])
 app.include_router(actions.router, prefix="/api", tags=["actions"])
 
 
+@app.get("/join.sh", include_in_schema=False)
+def join_sh(request: Request):
+    """The one-line join command on the Servers page downloads this script."""
+    return cluster.join_sh_response(request)
+
+
+@app.get("/api/whoami-primary", include_in_schema=False)
+def whoami_primary():
+    """Which member serves the UI. A secondary's web server redirects browsers here."""
+    n = RT.node()
+    if n is None or n.is_primary():
+        return {"primary": True, "leader_address": None}
+    return {"primary": False, "leader_address": RT.leader_address(), "leader_id": n.st.leader_id}
+
+
 @app.get("/")
 def root():
-    """App-level leader redirect (no VIP/keepalived — VRRP can't cross the tailnet L3
-    overlay). The primary serves the app; a non-primary serves a lightweight page that
-    names the current primary and 302-redirects to it. The target follows gossip, so
-    after a failover secondaries redirect to the NEW primary automatically."""
-    from fastapi.responses import HTMLResponse
-
-    db = get_db()
-    s = db.db.cluster.find_one({"_id": "self"}) or {}
-    if s.get("is_primary") or not s:  # primary (or un-clustered single host) serves normally
-        return {"name": "InfraDocs V6", "version": "0.1.0"}
-    leader_addr = CC.current_leader_address({n["node_id"]: n for n in db.db.cluster_nodes.find({}, {"_id": 0})})
-    leader_id = (db.db.settings.find_one({"_id": "app"}) or {}).get("primary_node")
-    if leader_addr:
-        body = (f"<html><body style='font-family:sans-serif;background:#0a0e14;color:#e5e7eb'>"
-                f"<p>This node is not the cluster primary. The primary is "
-                f"<b>{leader_id or 'unknown'}</b>.</p>"
-                f"<p>Redirecting to <a href='{leader_addr}'>{leader_addr}</a>…</p></body></html>")
-        return HTMLResponse(content=body, status_code=302, headers={"Location": leader_addr})
-    return HTMLResponse(
-        content="<html><body>This node is a cluster secondary and no primary is currently "
-                "reachable. Try again shortly or promote a node.</body></html>",
-        status_code=503,
-    )
+    return {"name": "InfraDocs", "version": RT.VERSION}

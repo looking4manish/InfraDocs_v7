@@ -35,3 +35,12 @@ def auth():
     cfg = load_config(str(ROOT / "config.yml"))
     password = os.environ.get(cfg.auth.password_env) or cfg.auth.dev_password
     return (cfg.auth.username, password)
+
+
+@pytest.fixture(autouse=True)
+def _no_cluster_runtime_leaks():
+    """Each test starts and ends with no replica-set runtime installed in this process."""
+    from app import cluster_runtime as RT
+    RT._node = None
+    yield
+    RT._node = None
