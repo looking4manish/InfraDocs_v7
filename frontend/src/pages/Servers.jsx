@@ -56,7 +56,7 @@ export default function Servers() {
   const self = members.find((m) => m.is_self);
   const isPrimary = cs.role === "primary" || cs.role === "standalone";
   const n = cs.voting_members || 0;
-  const tolerance = Math.max(0, n - (cs.quorum || 0));
+  const tolerance = Math.max(0, (cs.reachable_voters ?? n) - (cs.quorum || 0));
   const timeout = cs.settings?.election_timeout_s;
   const hb = cs.settings?.heartbeat_interval_s;
   const ladder = n > 5 ? [3, 4, 5, 6, 7] : [1, 2, 3, 4, 5];
@@ -68,7 +68,9 @@ export default function Servers() {
     : cs.mode === "manual"
       ? `${n} voting members is an even count, so a failed primary is replaced by hand. Make the count odd to turn on automatic failover.`
       : cs.has_quorum
-        ? `A majority is ${cs.quorum} of ${n} votes. ${tolerance === 1 ? "One server" : `${tolerance} servers`} can fail and the others elect a new primary within about ${timeout ? timeout + 2 : 12} seconds.`
+        ? (tolerance > 0
+          ? `A majority is ${cs.quorum} of ${n} votes. ${tolerance === 1 ? "One more server" : `${tolerance} more servers`} can fail and the others elect a new primary within about ${timeout ? timeout + 2 : 12} seconds.`
+          : `A majority is ${cs.quorum} of ${n} votes and exactly ${cs.quorum} answer. If one more voting member fails, no primary can be elected.`)
         : `Only ${cs.reachable_voters} of ${n} voting members answer; ${cs.quorum} are needed to elect a primary.`;
   const C = 2 * Math.PI * 36;
   const frac = n ? Math.min(1, cs.reachable_voters / n) : 1;

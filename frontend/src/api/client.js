@@ -98,6 +98,7 @@ export const endpoints = {
   // cluster (V7 replica set — docs/V7_API_CONTRACT.md)
   fleetNodes: () => api.get("/api/fleet/nodes"),
   clusterState: () => api.get("/api/cluster/state"),
+  whoamiPrimary: () => api.get("/api/whoami-primary"),
   clusterJoinCode: (votes, priority) =>
     api.post("/api/cluster/join-code", priority ? { votes, priority } : { votes }),
   clusterJoinStatus: (code) => api.get(`/api/cluster/join-code/${encodeURIComponent(code)}/status`),

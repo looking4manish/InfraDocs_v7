@@ -67,13 +67,12 @@ function PrimaryRedirect({ children }) {
   const [st, setSt] = useState(null);
   useEffect(() => {
     let alive = true;
-    const check = () => endpoints.clusterState().then((r) => alive && setSt(r.data)).catch(() => alive && setSt(null));
+    const check = () => endpoints.whoamiPrimary().then((r) => alive && setSt(r.data)).catch(() => alive && setSt(null));
     check();
     const t = setInterval(check, 10000);
     return () => { alive = false; clearInterval(t); };
   }, []);
-  const go = !!(st && st.role !== "primary" && st.role !== "standalone" && st.leader_id &&
-    st.leader_id !== st.node_id && st.leader_address);
+  const go = !!(st && st.primary === false && st.leader_address);
   useEffect(() => {
     if (!go) return undefined;
     const t = setTimeout(() => { window.location.href = st.leader_address; }, 2500);
@@ -84,7 +83,7 @@ function PrimaryRedirect({ children }) {
     <div className="gate">
       <div className="card">
         <span className="app-icon" style={{ width: 52, height: 52 }}><Server size={24} /></span>
-        <h1 style={{ margin: 0, fontSize: 22, fontWeight: 800 }}>{st.node_id} is a secondary</h1>
+        <h1 style={{ margin: 0, fontSize: 22, fontWeight: 800 }}>This server is a secondary</h1>
         <div style={{ color: "var(--subtle)" }}>The fleet is managed on the primary, <span className="mono" style={{ color: "var(--fg)" }}>{st.leader_id}</span>. Opening it now.</div>
         <a className="btn primary" href={st.leader_address}>Open {st.leader_id}<ArrowRight size={15} /></a>
       </div>
@@ -95,9 +94,9 @@ function PrimaryRedirect({ children }) {
 export default function App() {
   return (
     <ToastProvider>
+      <PrimaryRedirect>
       <Gate>
         {(user) => (
-          <PrimaryRedirect>
             <ScopeProvider>
               <BrowserRouter>
                 <Routes>
@@ -115,9 +114,9 @@ export default function App() {
                 </Routes>
               </BrowserRouter>
             </ScopeProvider>
-          </PrimaryRedirect>
         )}
       </Gate>
+      </PrimaryRedirect>
     </ToastProvider>
   );
 }

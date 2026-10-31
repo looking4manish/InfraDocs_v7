@@ -47,3 +47,4 @@ frontend/dist/
 *.bak.storfix
 *.bak.docker
 deploy/docker/.env
+scripts/e2e_shots/
