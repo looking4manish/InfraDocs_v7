@@ -42,9 +42,9 @@ bash ~/infradocs/install.sh            # optional: --name oci --projects ~/proje
 ```
 
 The installer checks the server, picks free ports, starts the stack (MongoDB + API + Caddy)
-and prints an address and a **setup code**. Open the address, enter the code, create the
-administrator, choose how InfraDocs is reached (Tailscale, a domain, or a Cloudflare Tunnel)
-and the first scan starts.
+and finishes setup in the terminal: administrator, the address other servers use (detected
+Tailscale/public addresses offered, reachability checked), first scan. No browser needed.
+Add `--browser` to finish in the setup wizard instead (address + setup code printed).
 
 **More servers**: Servers → Add a server. Choose voting or non-voting, then run the printed
 command on the new server:

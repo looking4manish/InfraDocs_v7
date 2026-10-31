@@ -16,12 +16,14 @@ step and a timestamped log in `deploy/docker/install.log`:
    free web/API/MongoDB ports (from 8081 / 8090 / 27018), Tailscale address and public IP if
    present, a random **setup code**, and a random service password. An existing `.env` is kept.
 3. Builds and starts `mongo` + `api` + `web`, then waits for the API and the web server.
-4. Prints the address to open and the setup code.
+4. Finishes setup **in the terminal** (no browser needed): asks for the administrator's
+   username and password, offers the addresses it detected (Tailscale name and address,
+   public IP, or one you type), checks that the chosen address really reaches this server,
+   then creates the administrator, forms a one-member replica set and starts the first scan.
 
-In the browser: enter the setup code, create the administrator, name the server, choose how it
-is reached (Tailscale, your domain, or a Cloudflare Tunnel; the address is checked by asking it
-for this server's identity), and finish. The server becomes a one-member replica set and the
-first scan starts.
+Unattended: `--admin-user manish --admin-password-file ~/pw.txt --address http://oci.example:8081`.
+Browser instead: `--browser` prints the address and a setup code for the wizard (also the
+fallback when no terminal is attached).
 
 ## More servers
 
