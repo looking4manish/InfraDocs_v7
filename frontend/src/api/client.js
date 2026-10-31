@@ -79,7 +79,7 @@ export const endpoints = {
 
   // first-run setup wizard
   setupStatus: () => api.get("/api/setup/status"),
-  detectIp: () => api.get("/api/setup/detect-ip"),
+  checkAddress: (address) => api.post("/api/setup/check-address", { address }),
   completeSetup: (body) => api.post("/api/setup/complete", body),
 
   // assets (Phase 3)
@@ -95,32 +95,19 @@ export const endpoints = {
   listEndpoints: (server) =>
     api.get("/api/endpoints", { params: server ? { server } : {} }),
 
-  // federation (multi-server)
-  federationServers: () => api.get("/api/federation/servers"),
-  mintFederationToken: (server_id) =>
-    api.post("/api/federation/tokens", { server_id }),
+  // cluster (V7 replica set — docs/V7_API_CONTRACT.md)
   fleetNodes: () => api.get("/api/fleet/nodes"),
   clusterState: () => api.get("/api/cluster/state"),
-  clusterPromote: (force = false) =>
-    api.post("/api/cluster/promote", { force }),
-  clusterOverride: (value) =>
-    api.post("/api/cluster/override", { value }),
-  // Admin / Cluster tab — role-transition matrix, enable toggle, evict, tokens, audit.
-  clusterEnable: (value) => api.post("/api/cluster/enable", { value }),
-  clusterAutoFailover: (value) => api.post("/api/cluster/auto-failover", { value }),
-  clusterToPrimary: (priority) => api.post("/api/cluster/to-primary", { priority }),
-  clusterJoin: (body) => api.post("/api/cluster/join", body),
-  clusterDemote: () => api.post("/api/cluster/demote"),
-  clusterHandoff: (target) => api.post("/api/cluster/handoff", { target }),
-  clusterToStandalone: (force, confirm_hostname) =>
-    api.post("/api/cluster/to-standalone", { force, confirm_hostname }),
-  clusterSetPriority: (priority) => api.post("/api/cluster/priority", { priority }),
-  clusterEvict: (node_id, confirm_hostname) =>
-    api.post("/api/cluster/evict", { node_id, confirm_hostname }),
-  clusterAudit: (limit = 100) => api.get("/api/cluster/audit", { params: { limit } }),
-  listFederationTokens: () => api.get("/api/federation/tokens"),
-  revokeFederationToken: (token) =>
-    api.delete(`/api/federation/tokens/${encodeURIComponent(token)}`),
+  clusterJoinCode: (votes, priority) =>
+    api.post("/api/cluster/join-code", priority ? { votes, priority } : { votes }),
+  clusterJoinStatus: (code) => api.get(`/api/cluster/join-code/${encodeURIComponent(code)}/status`),
+  clusterStepDown: () => api.post("/api/cluster/step-down"),
+  clusterTransfer: (to) => api.post("/api/cluster/transfer", { to }),
+  clusterTakeover: (confirm) => api.post("/api/cluster/takeover", { confirm }),
+  clusterUpdateMember: (nodeId, body) =>
+    api.post(`/api/cluster/members/${encodeURIComponent(nodeId)}`, body),
+  clusterRemoveMember: (nodeId) =>
+    api.delete(`/api/cluster/members/${encodeURIComponent(nodeId)}`, { params: { confirm: nodeId } }),
 
   // AI layer
   aiStatus: () => api.get("/api/ai/status"),

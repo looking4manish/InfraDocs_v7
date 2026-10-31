@@ -1,151 +1,92 @@
-import { useEffect, useState, useCallback } from "react";
-import { BrowserRouter, Route, Routes, Outlet, Navigate, useParams, useLocation } from "react-router-dom";
-import { AnimatePresence, motion } from "motion/react";
+import { useCallback, useEffect, useState } from "react";
+import { BrowserRouter, Navigate, Outlet, Route, Routes, useLocation } from "react-router-dom";
+import { Server, ArrowRight } from "lucide-react";
 import { endpoints, isAuthed, clearToken } from "./api/client";
 import { Login, ChangePassword } from "./pages/Login";
 import Setup from "./pages/Setup";
-import Header from "./components/Header";
-import FleetBanner from "./components/FleetBanner";
-import DrawerProvider from "./components/DrawerProvider";
-import CommandPalette from "./components/CommandPalette";
-import LensHome from "./pages/LensHome";
+import Dashboard from "./pages/Dashboard";
 import Projects from "./pages/Projects";
-import ProjectDetail from "./pages/ProjectDetail";
-import Applications from "./pages/Applications";
+import Application from "./pages/Application";
+import Servers from "./pages/Servers";
+import Web from "./pages/Web";
 import Assets from "./pages/Assets";
-import Ports from "./pages/Ports";
-import Storage from "./pages/Storage";
 import Actions from "./pages/Actions";
-import Scans from "./pages/Scans";
-import AdminCluster from "./pages/AdminCluster";
+import TopBar from "./components/TopBar";
+import CommandPalette from "./components/CommandPalette";
+import { ToastProvider } from "./components/Toasts";
+import { ScopeProvider } from "./lib/scope";
 
-// Old detail links (/applications/<name>) fold into the master-detail split view,
-// which carries the selection in ?sel= so the list stays mounted.
-function AppDetailRedirect() {
-  const { name } = useParams();
-  return <Navigate to={`/applications?sel=${encodeURIComponent(name)}`} replace />;
-}
-
-function AppShell() {
-  const location = useLocation();
+function Shell({ user }) {
+  const loc = useLocation();
+  useEffect(() => { window.scrollTo(0, 0); }, [loc.pathname]);
   return (
-    <div className="h-screen flex flex-col">
-      <Header />
-      <div className="flex-1 flex overflow-hidden">
-        <main className="flex-1 overflow-y-auto">
-          <div className="px-6 pt-5"><FleetBanner /></div>
-          <AnimatePresence mode="wait" initial={false}>
-            <motion.div
-              key={location.pathname}
-              initial={{ opacity: 0, y: 8 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -6 }}
-              transition={{ duration: 0.18, ease: "easeOut" }}
-              className="p-6"
-            >
-              <Outlet />
-            </motion.div>
-          </AnimatePresence>
-        </main>
-      </div>
-    </div>
+    <>
+      <TopBar user={user} />
+      <CommandPalette />
+      <main key={loc.pathname}><Outlet /></main>
+    </>
   );
 }
 
-// Gates the whole app behind login. Verifies the stored token via /me, forces
-// a password change when flagged, and falls back to the login screen on 401.
-function AuthGate({ children }) {
-  // loading | login | change | setup | ready
-  const [status, setStatus] = useState("loading");
+// First run → Setup. Otherwise sign-in, forced password change, then the app.
+function Gate({ children }) {
+  const [state, setState] = useState({ status: "loading" });
 
-  // After auth + password are OK, decide setup vs ready.
-  const afterPasswordOk = useCallback(async () => {
+  const resolve = useCallback(async () => {
     try {
       const { data } = await endpoints.setupStatus();
-      setStatus(data.setup_complete ? "ready" : "setup");
+      if (!data.setup_complete) return setState({ status: "setup", setup: data });
+    } catch { /* status unavailable — fall through to sign-in */ }
+    if (!isAuthed()) return setState({ status: "login" });
+    try {
+      const { data } = await endpoints.me();
+      if (data.must_change_password) return setState({ status: "change", user: data.username });
+      setState({ status: "ready", user: data.username });
     } catch {
-      setStatus("ready"); // never block the app if status check fails
+      clearToken();
+      setState({ status: "login" });
     }
   }, []);
 
-  const refresh = useCallback(async () => {
-    if (!isAuthed()) return setStatus("login");
-    try {
-      const { data } = await endpoints.me();
-      if (data.must_change_password) return setStatus("change");
-      await afterPasswordOk();
-    } catch {
-      clearToken();
-      setStatus("login");
-    }
-  }, [afterPasswordOk]);
-
   useEffect(() => {
-    refresh();
-    const onUnauth = () => setStatus("login");
+    const t = setTimeout(resolve, 0);
+    const onUnauth = () => setState({ status: "login" });
     window.addEventListener("ifd-unauthorized", onUnauth);
-    return () => window.removeEventListener("ifd-unauthorized", onUnauth);
-  }, [refresh]);
+    return () => { clearTimeout(t); window.removeEventListener("ifd-unauthorized", onUnauth); };
+  }, [resolve]);
 
-  if (status === "loading") return <div className="min-h-screen bg-[#0a0e14]" />;
-  if (status === "login")
-    return (
-      <Login
-        onLoggedIn={(d) =>
-          d.must_change_password ? setStatus("change") : afterPasswordOk()
-        }
-      />
-    );
-  if (status === "change")
-    return <ChangePassword onDone={afterPasswordOk} />;
-  if (status === "setup") return <Setup onDone={() => setStatus("ready")} />;
-  return children;
+  if (state.status === "loading") return <div className="gate" />;
+  if (state.status === "setup") return <Setup initial={state.setup} onDone={resolve} />;
+  if (state.status === "login") return <Login onLoggedIn={resolve} />;
+  if (state.status === "change") return <ChangePassword onDone={resolve} />;
+  return children(state.user);
 }
 
-// App-level leader redirect (no VIP/keepalived — VRRP can't cross the tailnet L3
-// overlay). If this node is not the cluster primary and a primary with a known address
-// exists, show a lightweight page naming it and redirect there. The target follows
-// gossip, so after a failover this points at the NEW primary automatically.
-function ClusterRedirectGate({ children }) {
-  const [state, setState] = useState(null);
+// A secondary sends the browser to the primary, which holds the fleet's data.
+function PrimaryRedirect({ children }) {
+  const [st, setSt] = useState(null);
   useEffect(() => {
     let alive = true;
-    const check = async () => {
-      try {
-        const { data } = await endpoints.clusterState();
-        if (alive) setState(data);
-      } catch {
-        if (alive) setState({ error: true });
-      }
-    };
+    const check = () => endpoints.clusterState().then((r) => alive && setSt(r.data)).catch(() => alive && setSt(null));
     check();
     const t = setInterval(check, 10000);
     return () => { alive = false; clearInterval(t); };
   }, []);
-
-  const leader = state?.current_leader;
-  const addr = (state?.nodes || []).find((n) => n.node_id === leader)?.address;
-  const shouldRedirect = !!(state && !state.error && leader && leader !== state.node_id && addr);
-
+  const go = !!(st && st.role !== "primary" && st.role !== "standalone" && st.leader_id &&
+    st.leader_id !== st.node_id && st.leader_address);
   useEffect(() => {
-    if (!shouldRedirect) return;
-    const t = setTimeout(() => { window.location.href = addr; }, 1500);
+    if (!go) return undefined;
+    const t = setTimeout(() => { window.location.href = st.leader_address; }, 2500);
     return () => clearTimeout(t);
-  }, [shouldRedirect, addr]);
-
-  if (!shouldRedirect) return children;
+  }, [go, st]);
+  if (!go) return children;
   return (
-    <div className="min-h-screen flex items-center justify-center bg-[#0a0e14] text-zinc-100 p-6">
-      <div className="neon-panel rounded-2xl p-7 max-w-md text-center">
-        <div className="text-lg font-semibold">This node is a cluster secondary</div>
-        <div className="text-sm text-zinc-400 mt-2">
-          The current primary is <span className="font-mono text-accent-soft">{leader}</span>.
-          Redirecting…
-        </div>
-        <a href={addr}
-          className="inline-block mt-4 text-[13px] px-4 py-2 rounded-lg neon-glow border border-[var(--neon)] bg-[var(--neon)]/10 hover:bg-[var(--neon)]/20">
-          Go to the primary →
-        </a>
+    <div className="gate">
+      <div className="card">
+        <span className="app-icon" style={{ width: 52, height: 52 }}><Server size={24} /></span>
+        <h1 style={{ margin: 0, fontSize: 22, fontWeight: 800 }}>{st.node_id} is a secondary</h1>
+        <div style={{ color: "var(--subtle)" }}>The fleet is managed on the primary, <span className="mono" style={{ color: "var(--fg)" }}>{st.leader_id}</span>. Opening it now.</div>
+        <a className="btn primary" href={st.leader_address}>Open {st.leader_id}<ArrowRight size={15} /></a>
       </div>
     </div>
   );
@@ -153,31 +94,30 @@ function ClusterRedirectGate({ children }) {
 
 export default function App() {
   return (
-    <AuthGate>
-    <ClusterRedirectGate>
-    <BrowserRouter>
-      <DrawerProvider>
-        <CommandPalette />
-        <Routes>
-          <Route element={<AppShell />}>
-            <Route path="/" element={<LensHome />} />
-            {/* Dashboard now lives as a lens on "/"; keep the old path deep-linkable. */}
-            <Route path="/dashboard" element={<Navigate to="/" replace />} />
-            <Route path="/applications" element={<Applications />} />
-            <Route path="/applications/:name" element={<AppDetailRedirect />} />
-            <Route path="/projects" element={<Projects />} />
-            <Route path="/projects/:name" element={<ProjectDetail />} />
-            <Route path="/assets" element={<Assets />} />
-            <Route path="/ports" element={<Ports />} />
-            <Route path="/storage" element={<Storage />} />
-            <Route path="/actions" element={<Actions />} />
-            <Route path="/scans" element={<Scans />} />
-            <Route path="/admin" element={<AdminCluster />} />
-          </Route>
-        </Routes>
-      </DrawerProvider>
-    </BrowserRouter>
-    </ClusterRedirectGate>
-    </AuthGate>
+    <ToastProvider>
+      <Gate>
+        {(user) => (
+          <PrimaryRedirect>
+            <ScopeProvider>
+              <BrowserRouter>
+                <Routes>
+                  <Route element={<Shell user={user} />}>
+                    <Route path="/" element={<Dashboard />} />
+                    <Route path="/projects" element={<Projects />} />
+                    <Route path="/projects/:name" element={<Application />} />
+                    <Route path="/servers" element={<Servers />} />
+                    <Route path="/web" element={<Web />} />
+                    <Route path="/assets" element={<Assets />} />
+                    <Route path="/actions" element={<Actions />} />
+                    <Route path="/setup" element={<Navigate to="/" replace />} />
+                    <Route path="*" element={<Navigate to="/" replace />} />
+                  </Route>
+                </Routes>
+              </BrowserRouter>
+            </ScopeProvider>
+          </PrimaryRedirect>
+        )}
+      </Gate>
+    </ToastProvider>
   );
 }
