@@ -87,14 +87,16 @@ export default function Application() {
   if (url) hops.push({ key: "host", edge: true, icon: Globe, k: "Hostname", v: url, s: a.internet_exposed ? `Internet${ex?.via ? ` · ${viaLabel(ex.via)}` : ""}` : "Private" });
   if (ex || ng) hops.push({
     key: "edge", icon: ShieldCheck, k: "Edge",
-    v: ex?.via === "cloudflare_tunnel" ? "Cloudflare Tunnel" : `${viaLabel(ex?.via || "nginx")}${(ng?.listen_ports || []).length ? ` :${ng.listen_ports[0]}` : " :443"}`,
-    s: certDays != null ? (certDays < 0 ? "Certificate expired" : `TLS valid · ${certDays} days left`) : ng?.has_ssl ? "TLS" : "No certificate seen",
+    v: `${viaLabel(ex?.via || "nginx")}${(ng?.listen_ports || []).length ? ` :${ng.listen_ports[0]}` : ""}`,
+    s: certDays != null ? (certDays < 0 ? "Certificate expired" : `TLS valid · ${certDays} days left`)
+      : ex?.via === "cloudflare_tunnel" ? "TLS ends at Cloudflare" : ng?.has_ssl ? "TLS" : "No certificate seen",
   });
   if (port) hops.push({ key: "port", icon: Plug, k: "Port", v: portEp?.host || `:${port}`, s: scopeText || "Listening" });
   if (containers.length) hops.push({ key: "c", icon: Container, k: "Containers", stack: containers.slice(0, 4).map((c) => ({ t: c.compose_service || c.name, orb: c.running ? "ok" : "danger" })), more: containers.length - 4 });
   else if (units.length) hops.push({ key: "u", icon: Cog, k: "Services", stack: units.slice(0, 4).map((u) => ({ t: u, orb: "ok" })), more: units.length - 4 });
-  const data = [...volumes.map((v) => ({ t: `${v.name} · ${bytes(v.size_bytes || 0)}` })),
-    ...(a.project_dir ? [{ t: `folder · ${bytes(a.project_dir_size_bytes || 0)}` }] : [])];
+  const data = [...volumes.map((v) => ({ t: v.name, z: bytes(v.size_bytes || 0), n: v.size_bytes || 0 })),
+    ...(a.project_dir ? [{ t: "folder", z: bytes(a.project_dir_size_bytes || 0), n: a.project_dir_size_bytes || 0 }] : [])]
+    .sort((x, y) => y.n - x.n);
   if (data.length) hops.push({ key: "d", icon: Database, k: "Data", stack: data.slice(0, 3).map((d) => ({ ...d, icon: HardDrive })), more: data.length - 3 });
 
   return (
@@ -124,7 +126,7 @@ export default function Application() {
         </div>
       )}
 
-      {hops.length > 0 && (
+      {hops.some((x) => x.key !== "d") && (
         <Card>
           <CardHead title="Request path" meta={url ? "From the public hostname to the data on disk" : "From the listener to the data on disk"} />
           <div className="path">
@@ -148,7 +150,12 @@ export default function Application() {
                       <div className="stack">
                         {hp.stack.map((x, i) => {
                           const SI = x.icon;
-                          return <div key={i}>{SI ? <SI size={13} /> : <span className={`orb ${x.orb}`} />}{x.t}</div>;
+                          return (
+                            <div key={i} title={x.z ? `${x.t} · ${x.z}` : x.t}>
+                              {SI ? <SI size={13} /> : <span className={`orb ${x.orb}`} />}
+                              <span className="t">{x.t}</span>{x.z && <span className="z">{x.z}</span>}
+                            </div>
+                          );
                         })}
                         {hp.more > 0 && <div style={{ color: "var(--faint)" }}>+{hp.more} more</div>}
                       </div>
@@ -171,7 +178,7 @@ export default function Application() {
                 <div className="r" key={c.name}>
                   <span className="ki"><Container size={15} /></span>
                   <span className="nm" title={c.name}>{c.name}</span>
-                  <span className="sub" title={c.image}>{c.image || "—"}</span>
+                  <span className="sub" title={c.image}>{(c.image || "—").replace(/^(ghcr\.io|docker\.io|quay\.io|registry\.[^/]+)\//, "")}</span>
                   <span><Chip tone={c.running ? "ok" : "danger"}>{c.running ? "Running" : "Exited"}</Chip></span>
                   <ActionBar entity={{ category: "docker_container", name: c.name }} />
                 </div>

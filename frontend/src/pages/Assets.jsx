@@ -8,7 +8,7 @@ import {
 import { endpoints } from "../api/client";
 import { useCluster, useApps, serverList } from "../lib/queries";
 import { useScope } from "../lib/scopeContext";
-import { bytes, isoDay, relTime } from "../lib/format";
+import { bytes, isoDay, relTime, shortDateTime } from "../lib/format";
 import { shortIssuer, SYSTEM } from "../lib/derive";
 import { Page, Head, Seg, SearchBox, Empty, Skel, Tag, Chip, Card, CardHead } from "../components/ui";
 import ActionBar from "../components/ActionBar";
@@ -54,14 +54,15 @@ function describe(a) {
     }
     case "storage_mount": {
       const p = m.usage_pct ?? m.usage_percent;
-      return { detail: <><span className="mono">{m.target || a.name}</span>{m.fstype ? ` · ${m.fstype}` : ""}</>, state: p == null ? ["idle", "Mounted"] : [p >= 90 ? "danger" : p >= 80 ? "warn" : "ok", `${Math.round(p)}% used`] };
+      const used = m.used_bytes != null && m.total_bytes ? `${bytes(m.used_bytes)} of ${bytes(m.total_bytes)}` : null;
+      return { detail: used || m.source, mono: true, state: p == null ? ["idle", "Mounted"] : [p >= 90 ? "danger" : p >= 80 ? "warn" : "ok", `${Math.round(p)}% used`] };
     }
     default:
       return { detail: a.status, state: ["idle", a.status || "—"] };
   }
 }
 const COL_HEADS = {
-  tls_certificate: ["Issuer", "Expires in"], storage_mount: ["Mount", "Usage"], network_port: ["Address", "Protocol"],
+  tls_certificate: ["Issuer", "Expires in"], storage_mount: ["Space", "Usage"], network_port: ["Address", "Protocol"],
   docker_container: ["Image", "State"], docker_image: ["Tag", "State"], cron_job: ["Schedule", "User"],
 };
 
@@ -146,7 +147,9 @@ export default function Assets() {
               <div className="tr th"><span /><span>Name</span><span>Project</span><span>Server</span><span>{heads[0]}</span><span>{heads[1]}</span></div>
             )}
             {list.isLoading && <div style={{ padding: 20 }}><Skel h={200} /></div>}
-            {!list.isLoading && cat && rows.length === 0 && <Empty icon={Search} title="Nothing matches">Change the filters or the search text.</Empty>}
+            {!list.isLoading && cat && rows.length === 0 && ((list.data || []).length
+              ? <Empty icon={Search} title="Nothing matches">Change the filters or the search text.</Empty>
+              : <Empty icon={info.icon} title={`No ${info.label.toLowerCase()} found`}>The latest scan recorded none.</Empty>)}
             {rows.map(({ a, d }) => {
               const I = info.icon;
               return (
@@ -171,7 +174,19 @@ export default function Assets() {
   );
 }
 
-const SKIP = new Set(["labels", "env_keys", "environment_keys", "raw", "mounts", "ports", "repo_digests", "connected_containers", "healthcheck_test"]);
+const SKIP = new Set(["labels", "env_keys", "environment_keys", "raw", "mounts", "ports", "repo_digests", "connected_containers",
+  "healthcheck_test", "days_until_expiry", "expiring_soon", "expired", "not_after", "usage_pct", "usage_percent", "running"]);
+const DATE_KEY = /(_at|^not_before|^created|^started)$/;
+const BYTES_KEY = /(bytes|^size)$/;
+const MONO_KEY = /path|file|address|image|_id$|dir|target|source|upstream|domains|subject|command|exec|unit|schedule|tags|port/;
+
+function factValue(k, v) {
+  if (typeof v === "boolean") return v ? "Yes" : "No";
+  if (/issuer/.test(k)) return shortIssuer(v);
+  if (DATE_KEY.test(k) && typeof v === "string") return shortDateTime(v);
+  if (BYTES_KEY.test(k) && typeof v === "number") return bytes(v);
+  return String(v);
+}
 
 function Inspector({ a, d, info }) {
   const m = a.metadata || {};
@@ -210,9 +225,7 @@ function Inspector({ a, d, info }) {
         {facts.map(([k, v]) => (
           <span key={k} style={{ display: "contents" }}>
             <span className="k">{k.replace(/_/g, " ").replace(/^./, (c) => c.toUpperCase())}</span>
-            <span className={`v${typeof v === "number" || /path|file|address|image|id$|dir|target|source|upstream/.test(k) ? " mono" : ""}`}>
-              {typeof v === "boolean" ? (v ? "Yes" : "No") : /bytes$/.test(k) ? bytes(v) : String(v)}
-            </span>
+            <span className={`v${typeof v === "number" || MONO_KEY.test(k) ? " mono" : ""}`}>{factValue(k, v)}</span>
           </span>
         ))}
         {lists.map(([k, v]) => (

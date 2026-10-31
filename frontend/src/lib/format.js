@@ -41,6 +41,15 @@ export function isoDay(v) {
   const d = toDate(v);
   return d ? d.toISOString().slice(0, 10) : "—";
 }
+// "14:02" today, otherwise "1 Nov 00:16".
+export function timeOfDay(v) {
+  const d = toDate(v);
+  if (!d) return "—";
+  const p = (n) => String(n).padStart(2, "0");
+  const t = `${p(d.getHours())}:${p(d.getMinutes())}`;
+  return d.toDateString() === new Date().toDateString() ? t : `${d.getDate()} ${MONTHS[d.getMonth()]} ${t}`;
+}
+
 export function clock(v) {
   const d = toDate(v);
   if (!d) return "—";
@@ -56,7 +65,8 @@ export function bytes(n) {
   const u = ["KB", "MB", "GB", "TB", "PB"];
   let v = n / 1024, i = 0;
   while (v >= 1024 && i < u.length - 1) { v /= 1024; i++; }
-  return `${v >= 100 ? Math.round(v) : v.toFixed(1)} ${u[i]}`;
+  const t = v >= 100 ? String(Math.round(v)) : v.toFixed(1).replace(/\.0$/, "");
+  return `${t} ${u[i]}`;
 }
 export function bytesParts(n) {
   const s = bytes(n);

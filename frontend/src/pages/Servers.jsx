@@ -148,7 +148,7 @@ export default function Servers() {
         </Card>
       </div>
 
-      <div className="mgrid" style={members.length <= 3 ? { gridTemplateColumns: `repeat(${members.length}, minmax(0, 1fr))${isPrimary ? " minmax(0, .8fr)" : ""}` } : { gridTemplateColumns: "repeat(auto-fill, minmax(300px, 1fr))" }}>
+      <div className={`mgrid m${Math.min(members.length, 4)}${isPrimary ? " add" : ""}`}>
         {members.map((m) => <Member key={m.node_id} m={m} cs={cs} isPrimary={cs.role === "primary"}
           onAct={(kind) => setConfirm({ kind, node: m.node_id })} />)}
         {isPrimary && (
@@ -219,9 +219,9 @@ function Member({ m, cs, isPrimary, onAct }) {
         <span className={`badge${prim ? "" : " sec"}`}>{badge}</span>
         <div style={{ minWidth: 0 }}>
           <div className="nm">{m.node_id}</div>
-          <div className="role">{roleName} · priority {m.priority} · {m.votes ? "1 vote" : "no vote"}</div>
+          <div className="role" title={`${m.votes ? "1 vote" : "No vote"}`}>{roleName} · priority {m.priority}</div>
         </div>
-        {down ? <Chip tone="danger">Unreachable</Chip> : m.scan_overdue ? <Chip tone="warn">Scans overdue</Chip> : <Chip tone="ok">Healthy</Chip>}
+        {down ? <Chip tone="danger">Unreachable</Chip> : m.scan_overdue ? <Chip tone="warn">Scans late</Chip> : <Chip tone="ok">Healthy</Chip>}
       </div>
       <div className="kv">
         <span className="k">Address</span><span className="v mono">{(m.address || "—").replace(/^https?:\/\//, "")}</span>

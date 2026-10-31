@@ -7,7 +7,7 @@ export default function ReplicaSetMap({ members, heartbeatS }) {
   const W = 720;
   const top = { x: W / 2, y: 92 };
   const n = rest.length;
-  const span = Math.min(520, 190 * Math.max(1, n - 1));
+  const span = n === 2 ? 380 : Math.min(560, 190 * Math.max(1, n - 1));
   const placed = rest.map((m, i) => ({ m, x: n === 1 ? W / 2 : W / 2 - span / 2 + (span / (n - 1)) * i, y: 220 }));
   const kind = (m) => (m.role === "unreachable" || !m.healthy ? "down" : m.role === "candidate" ? "candidate" : m.votes === 0 ? "nonvoting" : "secondary");
   const nodes = prim ? [{ m: prim, ...top, p: true }, ...placed] : placed.map((p, i) => (i === 0 ? { ...p, ...top } : p));

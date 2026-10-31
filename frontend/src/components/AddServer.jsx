@@ -3,7 +3,7 @@ import { createPortal } from "react-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Server, CircleX, Copy, Check, TriangleAlert, CircleCheck, Loader2, KeyRound } from "lucide-react";
 import { endpoints } from "../api/client";
-import { errDetail, relTime, clock } from "../lib/format";
+import { errDetail, timeOfDay } from "../lib/format";
 import { Btn, Chip } from "./ui";
 
 function modeAfter(voters) {
@@ -45,7 +45,7 @@ export default function AddServer({ cs, onClose }) {
 
   const after = n + votes;
   const mode = modeAfter(after);
-  const expires = mint.data?.expires_at ? clock(mint.data.expires_at) : null;
+  const expires = mint.data?.expires_at ? timeOfDay(mint.data.expires_at) : null;
   const step = st?.state === "joined" ? 3 : code ? 2 : 1;
   const copy = async () => {
     try { await navigator.clipboard.writeText(mint.data.command); setCopied(true); setTimeout(() => setCopied(false), 1600); } catch { /* clipboard refused */ }
@@ -128,7 +128,7 @@ export default function AddServer({ cs, onClose }) {
                         </div></div>
                       );
                     })}
-                    {st.state === "waiting" && <div style={{ color: "var(--faint)", fontSize: 12.5 }}>Waiting for the command to run{status.dataUpdatedAt ? ` · checked ${relTime(new Date(status.dataUpdatedAt))}` : ""}</div>}
+                    {st.state === "waiting" && <div style={{ color: "var(--faint)", fontSize: 12.5 }}>Waiting for the command to run</div>}
                     {st.state === "joined" && <div className="verdict" style={{ borderColor: "rgb(77 255 173 / .3)", background: "rgb(var(--glow) / .06)" }}><CircleCheck size={16} color="var(--hi)" /><span><b>{st.node_id}</b> joined the replica set.</span></div>}
                     {(st.state === "expired" || st.state === "failed") && <div className="formerr">{st.state === "expired" ? "The join code expired. Create a new one." : st.reason || "The join failed."}</div>}
                   </div>

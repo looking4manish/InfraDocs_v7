@@ -46,11 +46,6 @@ export default function CommandPalette() {
     window.addEventListener("ifd-palette", onOpen);
     return () => { window.removeEventListener("keydown", onKey); window.removeEventListener("ifd-palette", onOpen); };
   }, []);
-  useEffect(() => {
-    if (!open) return undefined;
-    const t = setTimeout(() => inputRef.current?.focus(), 0);
-    return () => clearTimeout(t);
-  }, [open]);
 
   const groups = useMemo(() => {
     const ql = q.trim().toLowerCase();
@@ -84,7 +79,7 @@ export default function CommandPalette() {
       <div className="palette" role="dialog" aria-label="Search">
         <div className="ph">
           <Search size={17} />
-          <input ref={inputRef} value={q} placeholder="Search projects, addresses and pages"
+          <input ref={inputRef} autoFocus value={q} placeholder="Search projects, addresses and pages"
             onChange={(e) => { setQ(e.target.value); setSel(0); }}
             onKeyDown={(e) => {
               if (e.key === "ArrowDown") { e.preventDefault(); setSel((s) => Math.min(flat.length - 1, s + 1)); }

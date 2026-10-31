@@ -609,3 +609,22 @@ input.input.sans { font-family: var(--sans); }
 .opt:disabled:not(.on) { opacity: .5; }
 .addcard { font: inherit; color: inherit; }
 .choice { text-align: left; font: inherit; color: inherit; }
+.verdict svg { flex: none; }
+.code span { word-break: normal; overflow-wrap: anywhere; }
+.hop .stack div { min-width: 0; }
+.hop .stack .t { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hop .stack .z { margin-left: auto; padding-left: 8px; color: var(--subtle); white-space: nowrap; }
+.member .role { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.member .h > div { flex: 1; }
+@media (min-width: 1361px) {
+  .mgrid.m1.add { grid-template-columns: minmax(0, 1fr) minmax(0, .8fr); }
+  .mgrid.m1 { grid-template-columns: minmax(0, 1fr); }
+  .mgrid.m2.add { grid-template-columns: repeat(2, minmax(0, 1fr)) minmax(0, .8fr); }
+  .mgrid.m2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .mgrid.m3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .mgrid.m3.add { grid-template-columns: repeat(3, minmax(0, 1fr)) minmax(0, .8fr); }
+  .mgrid.m4 { grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); }
+}
+.rows .r { grid-template-columns: 30px minmax(0, 1fr) minmax(0, 1.4fr) 104px 112px; }
+.hop .stack div { font-size: 12px; }
+@media (max-width: 1360px) { .hop { margin: 0 12px; } }

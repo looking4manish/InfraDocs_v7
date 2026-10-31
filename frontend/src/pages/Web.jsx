@@ -59,7 +59,7 @@ export default function Web() {
                 const name = owned ? e.service : e.recognized || "Unclaimed";
                 const h = owned ? appState.get(`${e.server}|${e.service}`) : null;
                 const down = h?.rt.state === "stopped";
-                const certWarn = h?.why && h.why.startsWith("Certificate");
+                const certWarn = g.key === "internet" && h?.why && h.why.startsWith("Certificate");
                 const openable = e.url && g.key !== "local";
                 const Tile = openable ? "a" : "div";
                 const desc = e.recognized && e.recognized !== name ? e.recognized : e.purpose || null;
