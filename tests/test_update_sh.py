@@ -77,7 +77,7 @@ def test_update_preserves_volumes_reports_commits_and_ends_healthy(sandbox):
     assert "down -v" not in calls and " -v" not in calls                 # NEVER tears down the volume
     assert "volume" not in calls.lower()
     assert (sandbox["dc"] / ".env").exists()                              # deploy env (secret/role) preserved
-    assert "fleet_sync" in calls or "app.tools.fleet_sync" in calls       # secret convergence attempted
+    assert "fleet_sync" not in calls                                      # V7: no separate secret sync step
 
 
 def test_update_health_failure_exits_nonzero_named_reason_without_wedging(sandbox):
