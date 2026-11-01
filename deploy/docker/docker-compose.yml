@@ -24,6 +24,13 @@ services:
     restart: unless-stopped
     network_mode: host          # port scanner needs host net; also reaches mongo on localhost
     pid: host                   # /proc/1/mounts (storage) + process mapping (ports)
+    # Port owners and their folders (/proc/<pid>/fd, /proc/<pid>/cwd) of OTHER users'
+    # processes. Without both, `ss -p` shows no owner, non-Docker ports land in System and
+    # nginx sites fronting them (lab.mdbdemo.in -> :8110) link to no project. Measured on
+    # OCI 1-Nov-2026: SYS_PTRACE alone is blocked by AppArmor's docker-default profile.
+    # Approved by the operator 1-Nov-2026. The container already holds docker.sock.
+    cap_add: ["SYS_PTRACE"]
+    security_opt: ["apparmor=unconfined"]
     environment:
       INFRADOCS_MONGO_URI: "mongodb://localhost:${MONGO_PORT:-27018}/"
       INFRADOCS_API_USERNAME: "${ADMIN_USER:-admin}"
