@@ -228,7 +228,8 @@ def detect(db: DBManager) -> dict:
 
 
 def _suggested_address(d: dict) -> str:
-    host = d.get("tailscale_dns") or d.get("tailscale_ip") or d.get("public_ip") or "localhost"
+    # An IP, not the *.ts.net name: MagicDNS does not resolve inside the members' containers.
+    host = d.get("tailscale_ip") or d.get("public_ip") or "localhost"
     return f"http://{host}:{d['port']}"
 
 

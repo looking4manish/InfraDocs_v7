@@ -76,6 +76,7 @@ def verify_auth(
 
     raise HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
+        # No WWW-Authenticate header: it makes browsers pop up their own sign-in box on top
+        # of the app's. Scripts still authenticate by sending Basic credentials up front.
         detail="authentication required",
-        headers={"WWW-Authenticate": "Basic"},
     )

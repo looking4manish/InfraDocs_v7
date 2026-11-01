@@ -133,7 +133,7 @@ ok "API healthy"
 web="$(curl -s -o /dev/null -w '%{http_code}' "http://localhost:${WEB_PORT}/" || true)"
 [[ "$web" == "200" ]] && ok "web server answering on :$WEB_PORT" || die "web server on :$WEB_PORT answered $web"
 
-HOST="${TS_DNS:-${TS_IP:-${PUB_IP:-localhost}}}"
+HOST="${TS_IP:-${PUB_IP:-localhost}}"   # an IP: MagicDNS names do not resolve inside containers
 ADDRESS="${ADDRESS:-http://$HOST:$WEB_PORT}"
 
 # ───────────── 4a. later servers: join ─────────────
@@ -205,8 +205,8 @@ if [[ -n "$UNATTENDED" ]]; then
 else
   read -rp "  Administrator username [${USER:-admin}]: " ADMIN_U; ADMIN_U="${ADMIN_U:-${USER:-admin}}"
   while true; do
-    read -rsp "  Password (12+ characters): " ADMIN_PW; echo
-    read -rsp "  Repeat password: " PW2; echo
+    IFS= read -rsp "  Password (12+ characters): " ADMIN_PW; echo
+    IFS= read -rsp "  Repeat password: " PW2; echo
     [[ "$ADMIN_PW" == "$PW2" ]] || { warn "the passwords differ"; continue; }
     [[ ${#ADMIN_PW} -ge 12 ]] || { warn "use at least 12 characters"; continue; }
     break
@@ -220,7 +220,8 @@ ok "administrator: $ADMIN_U"
 MODE="domain"
 if [[ -z "$UNATTENDED" && -z "$ADDRESS_FLAG" ]]; then
   cands=()
-  [[ -n "$TS_DNS" ]] && cands+=("http://$TS_DNS:$WEB_PORT|Tailscale name, private to your tailnet")
+  # The Tailscale address, not the *.ts.net name: containers do not use MagicDNS, so other
+  # members' API containers could not resolve the name.
   [[ -n "$TS_IP"  ]] && cands+=("http://$TS_IP:$WEB_PORT|Tailscale address, private to your tailnet")
   [[ -n "$PUB_IP" ]] && cands+=("http://$PUB_IP:$WEB_PORT|Public IP, open port $WEB_PORT in the cloud firewall")
   echo "  How will other servers and your browser reach this one?"
@@ -269,6 +270,7 @@ if out="$(api POST /api/setup/complete "$body")"; then
     Address       $ADDRESS
     Sign in as    $ADMIN_U
     Add servers   Servers → Add a server
+    Password      ${DC[*]} --env-file .env exec api python -m app.tools.admin_password check $ADMIN_U
   └──────────────────────────────────────────────────────────┘
 
 EOF

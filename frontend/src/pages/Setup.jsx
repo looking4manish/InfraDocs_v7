@@ -55,7 +55,7 @@ export default function Setup({ initial, onDone }) {
 
   const pickMode = (m) => {
     let address = f.address;
-    if (m === "tailscale") address = initial?.suggested_address || (det.tailscale_dns ? `http://${det.tailscale_dns}:${det.port || 8081}` : "");
+    if (m === "tailscale") address = initial?.suggested_address || (det.tailscale_ip ? `http://${det.tailscale_ip}:${det.port || 8081}` : "");
     else if (f.mode === "tailscale") address = "https://";
     setF((x) => ({ ...x, mode: m, address }));
   };
