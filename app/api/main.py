@@ -25,7 +25,11 @@ def _scan_scheduler(cfg, stop: threading.Event, logger) -> None:
     result to the primary. Runs only once setup is complete."""
     from app.api.routers.scans import run_scan_now
     interval = max(1, int(cfg.scanning.interval_minutes)) * 60
-    while not stop.wait(interval):
+    # First scan 30 s after start, so an update or restart shows fresh data without waiting
+    # a whole interval; then every interval.
+    wait = 30
+    while not stop.wait(wait):
+        wait = interval
         try:
             db = get_db()
             if (db.db.settings.find_one({"_id": "app"}) or {}).get("setup_complete"):
