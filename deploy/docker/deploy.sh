@@ -130,8 +130,13 @@ for i in $(seq 1 90); do
   sleep 2
 done
 ok "API healthy"
-web="$(curl -s -o /dev/null -w '%{http_code}' "http://localhost:${WEB_PORT}/" || true)"
-[[ "$web" == "200" ]] && ok "web server answering on :$WEB_PORT" || die "web server on :$WEB_PORT answered $web"
+for i in $(seq 1 30); do
+  web="$(curl -s -o /dev/null -w '%{http_code}' "http://localhost:${WEB_PORT}/" || true)"
+  [[ "$web" == "200" ]] && break
+  [[ "$i" == "30" ]] && { "${DC[@]}" --env-file .env logs --tail 30 web; die "web server on :$WEB_PORT still answered $web after 60 seconds"; }
+  sleep 2
+done
+ok "web server answering on :$WEB_PORT"
 
 HOST="${TS_IP:-${PUB_IP:-localhost}}"   # an IP: MagicDNS names do not resolve inside containers
 ADDRESS="${ADDRESS:-http://$HOST:$WEB_PORT}"
