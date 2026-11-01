@@ -175,6 +175,14 @@ def discover_docker_projects() -> Dict[str, str]:
     return out
 
 
+def is_home_dir(path) -> bool:
+    """A user's home folder itself (/home/<user>, /root) holds projects; it is never one.
+    Without this, a marker in the home folder (a dotfiles .git, a stray compose file) or a
+    service run from it turned the whole home folder into a project named after the user."""
+    parts = Path(str(path)).parts
+    return parts == ("/", "root") or (len(parts) == 3 and parts[:2] == ("/", "home"))
+
+
 class ProjectDetector:
     DOMAIN_MAPPING = {
         "infra": "InfraDocs_V6",
@@ -293,6 +301,9 @@ class ProjectDetector:
         try:
             path = path.resolve()
         except OSError:
+            return
+        if is_home_dir(path):
+            self._log.info("project_detector: %s is a home folder, not a project — skipped", path)
             return
         # Keep the first path seen for a name (don't let a later root shadow it).
         self._projects.setdefault(name, path)
@@ -421,7 +432,7 @@ class ProjectDetector:
         if not path_str or not path_str.startswith("/"):
             return False
         p = Path(path_str)
-        if len(p.parts) < 3 or p.parts[1] in _SYSTEM_TOP_DIRS:
+        if len(p.parts) < 3 or p.parts[1] in _SYSTEM_TOP_DIRS or is_home_dir(p):
             return False
         for anc in [p, *p.parents]:
             s = str(anc)

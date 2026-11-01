@@ -56,6 +56,7 @@ services:
       - /etc/cron.daily:/etc/cron.daily:ro
       - /run/systemd:/run/systemd
       - /run/dbus:/run/dbus
+      - /run/user:/run/user                         # user managers (systemctl --user units)
     depends_on:
       - mongo
 

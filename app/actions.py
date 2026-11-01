@@ -278,6 +278,10 @@ def _act_systemd(
     if any(name.startswith(p) for p in SELF_PROTECT_PREFIXES):
         raise SelfActionRefused(f"refusing to act on protected unit: {name}")
 
+    meta = asset.get("metadata") or {}
+    if meta.get("scope") == "user":
+        return _act_user_unit(name, meta, action, args)
+
     if action in ("start", "stop", "restart", "enable", "disable"):
         cmd = ["sudo", "-n", "systemctl", action, name]
         return _run_subprocess(cmd, timeout=30)
@@ -299,6 +303,27 @@ def _act_systemd(
             str(tail),
         ]
         return _run_subprocess(cmd, timeout=15)
+    raise ActionNotAllowed(action)
+
+
+def _act_user_unit(name: str, meta: Dict[str, Any], action: str, args: Dict[str, Any]) -> ActionResult:
+    """A `systemctl --user` unit is driven as its owner, through that user's own manager
+    (no sudo: the user already controls their own units)."""
+    from app.scanners.systemd import user_systemctl
+    if meta.get("uid") is None:
+        raise ActionNotAllowed(f"{action} (user unit {name} was scanned without its uid; rescan)")
+    ctl = user_systemctl(meta)
+    if action in ("start", "stop", "restart", "enable", "disable"):
+        return _run_subprocess([*ctl, action, name], timeout=30)
+    if action == "trigger":
+        svc = name[:-6] + ".service" if name.endswith(".timer") else name
+        return _run_subprocess([*ctl, "start", svc], timeout=30)
+    if action == "status":
+        return _run_subprocess([*ctl, "status", "--no-pager", "-n", "0", name], timeout=10, allow_nonzero=True)
+    if action == "logs":
+        tail = min(int(args.get("tail", 100)), 1000)
+        return _run_subprocess(["journalctl", f"_SYSTEMD_USER_UNIT={name}", f"_UID={meta['uid']}",
+                                "--no-pager", "-n", str(tail)], timeout=15)
     raise ActionNotAllowed(action)
 
 

@@ -1,5 +1,6 @@
 """Systemd scanner — services and timers."""
 
+import os
 import re
 import subprocess
 from pathlib import Path
@@ -34,6 +35,37 @@ SYSTEMD_SHOW_PROPS = [
 ]
 
 
+# Where user managers keep their runtime dirs. Containerized, docker-compose mounts the
+# host's /run/user here.
+_RUN_USER = os.environ.get("INFRADOCS_RUN_USER", "/run/user")
+
+
+def _host_passwd() -> Dict[int, tuple]:
+    """uid -> (user name, gid) from the HOST's passwd (via /host when containerized)."""
+    host_root = os.environ.get("INFRADOCS_HOST_ROOT", "").rstrip("/")
+    out: Dict[int, tuple] = {}
+    try:
+        with open(f"{host_root}/etc/passwd", "r") as f:
+            for line in f:
+                p = line.strip().split(":")
+                if len(p) >= 4 and p[2].isdigit() and p[3].isdigit():
+                    out[int(p[2])] = (p[0], int(p[3]))
+    except OSError:
+        pass
+    return out
+
+
+def user_systemctl(mgr: Dict[str, Any], tool: str = "systemctl") -> List[str]:
+    """Command prefix that talks to one user's manager AS that user (a user bus only
+    accepts its owner). Used by the scanner and by actions on user units."""
+    rd = mgr["runtime_dir"] if "runtime_dir" in mgr else f"{_RUN_USER}/{mgr['uid']}"
+    env = ["env", f"XDG_RUNTIME_DIR={rd}", f"DBUS_SESSION_BUS_ADDRESS=unix:path={rd}/bus"]
+    if os.geteuid() == int(mgr["uid"]):
+        return [*env, tool, "--user"]
+    return ["setpriv", f"--reuid={mgr['uid']}", f"--regid={mgr['gid']}", "--clear-groups",
+            *env, tool, "--user"]
+
+
 def _parse_show_output(text: str) -> Dict[str, str]:
     out = {}
     for line in text.splitlines():
@@ -63,14 +95,54 @@ class SystemdScanner(BaseScanner):
     def scanner_name(self) -> str:
         return "systemd"
 
+    # The systemctl command for the manager being scanned: the system manager by default,
+    # one user manager at a time during the user pass (see _user_managers).
+    _ctl: List[str] = ["systemctl"]
+    _scope: Optional[Dict[str, Any]] = None
+
     def scan(self) -> List[Dict[str, Any]]:
+        self._ctl, self._scope = ["systemctl"], None
         self._show_cache: Dict[str, Dict[str, str]] = {}
         # Pre-pass: promote each app's dir ONCE, using the shallowest dir across all
         # units, so a multi-service app (e.g. mdb-discovery-proxy in /…/mdb-discovery
         # and mdb-discovery-backend in /…/mdb-discovery/backend) collapses to a single
         # `mdb-discovery` project instead of also spawning a bogus `backend`.
         self._promote_service_dirs()
-        return self._scan_units("service") + self._scan_units("timer")
+        assets = self._scan_units("service") + self._scan_units("timer")
+        # USER UNITS (V7). Apps installed without root run as `systemctl --user` units
+        # (mdb-playground's studio/app/backend on OCI). The system manager never lists
+        # them, so V6 attributed their ports and sites to nothing. Scan every running user
+        # manager the same way, as that user.
+        for mgr in self._user_managers():
+            self._ctl, self._scope = user_systemctl(mgr), mgr
+            self._show_cache = {}
+            try:
+                self._promote_service_dirs()
+                assets += self._scan_units("service") + self._scan_units("timer")
+            except Exception as e:  # noqa: BLE001 — one user's manager must not sink the scan
+                self.add_error(f"user units of {mgr['user']} (uid {mgr['uid']}) failed: {e}")
+        self._ctl, self._scope = ["systemctl"], None
+        return assets
+
+    def _user_managers(self) -> List[Dict[str, Any]]:
+        """Running user managers: /run/user/<uid>/bus exists. Root can read any of them
+        (it switches to that user); a non-root native install only reads its own."""
+        out: List[Dict[str, Any]] = []
+        try:
+            uids = sorted(int(d) for d in os.listdir(_RUN_USER) if d.isdigit())
+        except OSError:
+            return out
+        names = _host_passwd()
+        me = os.geteuid()
+        for uid in uids:
+            rd = f"{_RUN_USER}/{uid}"
+            if uid == 0 or not os.path.exists(f"{rd}/bus"):
+                continue
+            if me != 0 and me != uid:
+                continue
+            user, gid = names.get(uid, (str(uid), uid))
+            out.append({"uid": uid, "gid": gid, "user": user, "runtime_dir": rd})
+        return out
 
     def _candidate_dir(self, show: Dict[str, str]) -> str:
         """The app dir a service runs from: WorkingDirectory if set, else the ExecStart
@@ -92,7 +164,7 @@ class SystemdScanner(BaseScanner):
         names = set(self._list_unit_file_names("service"))
         try:
             r = subprocess.run(
-                ["systemctl", "list-units", "--type=service", "--all", "--no-pager", "--plain"],
+                [*self._ctl, "list-units", "--type=service", "--all", "--no-pager", "--plain"],
                 capture_output=True, text=True, timeout=15, check=False,
             )
             for line in r.stdout.splitlines():
@@ -131,7 +203,7 @@ class SystemdScanner(BaseScanner):
         try:
             result = subprocess.run(
                 [
-                    "systemctl", "list-units", f"--type={unit_type}",
+                    *self._ctl, "list-units", f"--type={unit_type}",
                     "--all", "--no-pager", "--plain",
                 ],
                 capture_output=True, text=True, timeout=15, check=False,
@@ -174,7 +246,7 @@ class SystemdScanner(BaseScanner):
         try:
             r = subprocess.run(
                 [
-                    "systemctl", "list-unit-files", f"--type={unit_type}",
+                    *self._ctl, "list-unit-files", f"--type={unit_type}",
                     "--no-pager", "--plain",
                 ],
                 capture_output=True, text=True, timeout=15, check=False,
@@ -238,6 +310,12 @@ class SystemdScanner(BaseScanner):
                 p for p in (show.get("EnvironmentFiles") or "").split() if p
             ],
         }
+        scope = self._scope
+        if scope:
+            metadata["scope"] = "user"
+            metadata["user"] = scope["user"]
+            metadata["uid"] = scope["uid"]
+            metadata["gid"] = scope["gid"]
         health = {
             "loaded": load_state == "loaded",
             "active": active_state == "active",
@@ -247,7 +325,8 @@ class SystemdScanner(BaseScanner):
 
         return self.create_asset(
             category=category,
-            asset_id=f"{self.server_id}:{unit_type}:{unit_name}",
+            asset_id=(f"{self.server_id}:{unit_type}:user:{scope['user']}:{unit_name}" if scope
+                      else f"{self.server_id}:{unit_type}:{unit_name}"),
             name=unit_name,
             status=active_state,
             project=project,
@@ -262,7 +341,7 @@ class SystemdScanner(BaseScanner):
         try:
             result = subprocess.run(
                 [
-                    "systemctl",
+                    *self._ctl,
                     "show",
                     "-p",
                     ",".join(SYSTEMD_SHOW_PROPS),
@@ -283,7 +362,7 @@ class SystemdScanner(BaseScanner):
     def _is_enabled(self, unit_name: str) -> bool:
         try:
             result = subprocess.run(
-                ["systemctl", "is-enabled", "--quiet", unit_name],
+                [*self._ctl, "is-enabled", "--quiet", unit_name],
                 capture_output=True,
                 timeout=5,
                 check=False,
